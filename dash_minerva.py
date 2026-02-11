@@ -649,57 +649,59 @@ def create_tree_table(file_list, category, active_item):
 
 
 # --- [Callback for File Download] ---
+import shutil # Added: for folder archiving
+
 @callback(
     [Output("download-component", "data"),
      Output("download-toast", "is_open"),
      Output("download-toast-body", "children"),
      Output("loading-output-target", "children")],
-    # ID dictionary keys MUST match exactly: type, index, category
     Input({"type": "btn-download", "index": ALL, "file_name": ALL, "category": ALL}, "n_clicks"),
+    # We need to check if the clicked item is a folder or not
+    # So we might need to pass that info through 'id' or query it
     prevent_initial_call=True
 )
 def handle_file_download(n_clicks_list):
-    # 1. Check if the callback was triggered by an actual click
-    # n_clicks_list will be a list of integers [0, 1, 0...]
-
     if not ctx.triggered or not any(click > 0 for click in n_clicks_list if click is not None):
         return dash.no_update
-    print(f"Debug: Triggered ID: {ctx.triggered_id}")
 
-    # 2. Identify which specific button was clicked
-    # triggered_id will look like: {"type": "btn-download", "index": "FILE_XYZ", "category": "inputs"}
     triggered_info = ctx.triggered_id
-
-    # 3. Extract information
     file_id = triggered_info['index']
     category = triggered_info['category']
     file_name = triggered_info['file_name']
 
-    print(f"!!! DOWNLOAD START !!! File ID: {file_id} {file_name}, Category: {category}")
+    # Check if the target is a folder based on the icon/type logic
+    # (Here we assume your MinervaClient can handle or identify folders)
 
     try:
-        success_msg = f"[{category.upper()}] {file_name} 다운로드를 시작합니다."
-
-        # Ensure temporary download directory exists
         if not os.path.exists(TEMP_DOWNLOAD_PATH):
             os.makedirs(TEMP_DOWNLOAD_PATH)
 
-        # Execute the download to server local directory via MinervaClient
+        # 1. Download target from Minerva to Server
+        # Note: Your client's download method should handle both files and folders
         minerva.download_file_by_id(file_id, local_directory=TEMP_DOWNLOAD_PATH)
 
-        #file_url = minerva.get_file_url_by_id(file_id)
-        #print(f"DEBUG: File URL -> {file_url}")
+        target_path = os.path.join(TEMP_DOWNLOAD_PATH, file_name)
 
-        # download to local via dcc.Download
-        data = dcc.send_file(TEMP_DOWNLOAD_PATH + "/" + file_name)
+        # 2. Check if the downloaded target is a directory
+        if os.path.isdir(target_path):
+            # Create a zip file: temp_downloads/file_name.zip
+            zip_base_name = os.path.join(TEMP_DOWNLOAD_PATH, file_name)
+            # shutil.make_archive(output_filename_without_extension, format, root_dir)
+            zip_path_full = shutil.make_archive(zip_base_name, 'zip', target_path)
+
+            success_msg = f"[{category.upper()}] Folder '{file_name}' has been zipped and download started."
+            data = dcc.send_file(zip_path_full)
+        else:
+            # It's a single file
+            success_msg = f"[{category.upper()}] File '{file_name}' download started."
+            data = dcc.send_file(target_path)
 
         return data, True, success_msg, ""
 
     except Exception as e:
-        print(f"ERROR: {str(e)}")
-        return True, f"다운로드 실패: {str(e)}"
-
-
+        print(f"ERROR during download/zip: {str(e)}")
+        return dash.no_update, True, f"Transfer failed: {str(e)}", ""
 
 if __name__ == "__main__":
     app.run(debug=True)
