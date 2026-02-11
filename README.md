@@ -50,13 +50,16 @@ $ cd dash_minerva
 
 ### 2. Create a Virtual Environment
 It is highly recommended to use a virtual environment to manage dependencies:
-# Create the environment
+#### Create the environment
 ```
 $ python -m venv .venv
+```
+#### Activate the environment
 
-# Activate the environment
+```
 # On Windows:
 $ .venv\Scripts\activate
+
 # On Mac/Linux:
 $ source .venv/bin/activate
 ```
@@ -64,7 +67,7 @@ $ source .venv/bin/activate
 ### 3. Install Required Packages
 Install all necessary libraries including Dash, OData-related tools, and data processing packages:
 ```
-$ pip install -r requirements.txt
+(.venv)$ pip install -r requirements.txt
 ```
 
 ### 4. Configure Environment Variables
@@ -76,3 +79,18 @@ MINERVA_PASS=your_password
 TEMP_DOWNLOAD_PATH=./temp_downloads
 ```
 *Note: Ensure .env is listed in your .gitignore to prevent leaking credentials.*
+
+## 🏃 Execution
+
+Once the installation is complete and the `.env` file is configured, you can run the dashboard using the following command:
+
+```
+(.venv)$ python dash_minerva.py
+```
+
+After running the command:
+1. Open your web browser.
+2. Go to http://127.0.0.1:8050
+3. You should see the Minerva File Management Dashboard.
+
+*Note: If you are running the app on a server, ensure that port 8050 is open in your firewall settings.*
