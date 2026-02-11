@@ -171,7 +171,7 @@ class MinervaClient:
         return None
 
 
-    @log("[{timestamp}] Download by ID: {id} | Status: {status} | Took: {duration}", mode="both")
+    #@log("[{timestamp}] Download by ID: {id} | Status: {status} | Took: {duration}", mode="both")
     def download_file_by_id(self, id: str, local_directory: str):
        path = "\\Ans_Data\\" + id
        return self.download_file(remote_path=path, local_directory=local_directory)

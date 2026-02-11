@@ -70,7 +70,7 @@ $ pip install -r requirements.txt
 ### 4. Configure Environment Variables
 The application requires sensitive credentials to access the Minerva OData API. Create a `.env` file in the root directory and add the following:
 ```
-MINERVA_URL=[https://your-minerva-server.com](https://your-minerva-server.com)
+MINERVA_URL=https://your-minerva-server.com
 MINERVA_USER=your_id
 MINERVA_PASS=your_password
 TEMP_DOWNLOAD_PATH=./temp_downloads

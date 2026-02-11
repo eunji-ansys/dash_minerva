@@ -3,22 +3,27 @@ import os
 import uuid
 import math
 from datetime import datetime
+from dotenv import load_dotenv
+
 import dash
 from dash import dcc, html, Input, Output, State, callback, clientside_callback, ClientsideFunction, ALL, MATCH, ctx
 import dash_bootstrap_components as dbc
 from logic.services.minerva_client import MinervaClient
 #from logic.services.dummy_client import DummyClient
 
-#from dummy_data import MinervaClient
+# --- [0. Load Environment Variables] ---
+# Load variables from .env file
+load_dotenv()
 
-# --- [Configuration: Viewer Settings] ---
+# Fetch Minerva credentials and settings
+MINERVA_URL = os.getenv("MINERVA_URL", "http://default-url")
+MINERVA_DB = os.getenv("MINERVA_DB", "MinervaDB")
+MINERVA_USER = os.getenv("MINERVA_USER")
+MINERVA_PASS = os.getenv("MINERVA_PASS")
+TEMP_DOWNLOAD_PATH = os.getenv("TEMP_DOWNLOAD_PATH", "./temp_downloads")
 
-# --- [1. API Simulation Functions] ---
-url = "http://seow22mindev01/AnsysMinerva"
-db = "MinervaDB"
-user = "admin"
-password = "minerva"
-minerva = MinervaClient(url, db, user, password)
+# --- [1. Initialize Minerva Client] ---
+minerva = MinervaClient(MINERVA_URL, MINERVA_DB, MINERVA_USER, MINERVA_PASS)
 #minerva = DummyClient()  # For testing without real server
 
 # --- [2. Helper Functions] ---
@@ -675,18 +680,18 @@ def handle_file_download(n_clicks_list):
     try:
         success_msg = f"[{category.upper()}] {file_name} 다운로드를 시작합니다."
 
-        DOWNLOAD_DIR = "C:/Minerva_Downloads"
-        if not os.path.exists(DOWNLOAD_DIR):
-            os.makedirs(DOWNLOAD_DIR)
+        # Ensure temporary download directory exists
+        if not os.path.exists(TEMP_DOWNLOAD_PATH):
+            os.makedirs(TEMP_DOWNLOAD_PATH)
 
         # Execute the download to server local directory via MinervaClient
-        minerva.download_file_by_id(file_id, local_directory=DOWNLOAD_DIR)
+        minerva.download_file_by_id(file_id, local_directory=TEMP_DOWNLOAD_PATH)
 
         #file_url = minerva.get_file_url_by_id(file_id)
         #print(f"DEBUG: File URL -> {file_url}")
 
         # download to local via dcc.Download
-        data = dcc.send_file(DOWNLOAD_DIR + "/" + file_name)
+        data = dcc.send_file(TEMP_DOWNLOAD_PATH + "/" + file_name)
 
         return data, True, success_msg, ""
 
