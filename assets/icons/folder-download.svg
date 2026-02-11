@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none">
+  <g stroke="#000" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+
+    <!-- Top bar -->
+    <rect x="10" y="8" width="180" height="44" rx="6" />
+
+    <!-- Outer container -->
+    <path d="M20 52 V162
+             Q20 192 52 192
+             H148
+             Q180 192 180 162
+             V52" />
+
+    <!-- Arrow shaft (center preserved, visually larger) -->
+    <path d="M100 76 V154" />
+
+    <!-- Arrow head -->
+    <path d="M52 126 L100 154 L148 126" />
+  </g>
+</svg>
