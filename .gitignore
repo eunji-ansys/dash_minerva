@@ -1,0 +1,43 @@
+# --- Python environment ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+bin/
+lib/
+
+# --- Environment variables & Secrets ---
+# Crucial: Never commit your Minerva credentials
+.env
+.flaskenv
+
+# --- Project-specific temporary files ---
+# Local storage for files downloaded from Minerva before streaming to user
+temp_downloads/
+*.zip
+*.tar
+*.gz
+*.7z
+
+# --- Dash/Flask logs and local caches ---
+.dash-connection-check
+assets/typography.css.map
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Operating System files ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- IDE specific configs ---
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# --- Log files ---
+*.log
