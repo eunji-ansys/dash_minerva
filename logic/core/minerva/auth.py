@@ -1,6 +1,6 @@
 import hashlib
 import requests
-from ..utils.decorators import log
+from ...utils.decorators import log
 
 class MinervaAuth:
     """Handles OAuth2 authentication and credential management."""

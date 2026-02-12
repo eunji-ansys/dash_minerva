@@ -1,12 +1,12 @@
 import os
-from ..core.auth import MinervaAuth
-from ..core.odata import MinervaODataClient
-from ..core.cli_executor import CLIExecutor
+from ..core.minerva.auth import MinervaAuth
+from ..core.minerva.odata import MinervaODataClient
+from ..core.minerva.cli import CLIAuthContext, MinervaCLIClient
 import logging
 from ..utils.decorators import log
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 
-class MinervaClient:
+class VDClient:
     _instance = None
 
     def __new__(cls, *args, **kwargs):
@@ -14,14 +14,19 @@ class MinervaClient:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def __init__(self, url: str, db: str, user: str, pw: str, cli_path: str = None):
+    def __init__(self, url: str, db: str, user: str, pw: str):
         if hasattr(self, '_init'): return
 
         # 1. Initialize Core Layers
-        self.auth = MinervaAuth(url, db, user, pw)
-        self.odata = MinervaODataClient(self.auth)
-        self.cli = CLIExecutor(cli_path or os.environ.get("ANS_MINERVA_CLI"))
+        self.odata_auth = MinervaAuth(url, db, user, pw)
+        self.odata = MinervaODataClient(self.odata_auth)
+        self.cli = MinervaCLIClient(url, db)
 
+        self.cli_auth = CLIAuthContext(
+            mode="Explicit",
+            user=os.getenv("MINERVA_USER"),
+            password=os.getenv("MINERVA_PASS")
+        )
         self.url = url
         self.db = db
         self._init = True
@@ -143,21 +148,6 @@ class MinervaClient:
 
         return results
 
-    @log("[{timestamp}] Upload: {local_path} to {remote_path} | Status: {status} | Took: {duration}", mode="both")
-    def upload_file(self, local_path, remote_path):
-        """Executes CLI upload with integrated auth context."""
-        if not self.auth.token:
-            self.auth.authenticate()
-
-        auth_ctx = {
-            "token": self.auth.token,
-            "url": self.url,
-            "db": self.db,
-            "password": self.auth.password # Fallback for CLI
-        }
-        return self.cli.run("upload", ["--local", local_path, "--remote", remote_path], auth_context=auth_ctx)
-
-
     def get_file_url_by_id(self, id: str) -> str:
         """Fetches the file URL/path on the Minerva server by file ID."""
         ans_data = self.odata.get_item_by_id("Ans_Data", item_id=id, select_fields=["local_file"])
@@ -173,43 +163,11 @@ class MinervaClient:
 
     #@log("[{timestamp}] Download by ID: {id} | Status: {status} | Took: {duration}", mode="both")
     def download_file_by_id(self, id: str, local_directory: str):
-       path = "\\Ans_Data\\" + id
+       path = "Ans_Data\\" + id
        return self.download_file(remote_path=path, local_directory=local_directory)
 
     @log("[{timestamp}] Download: {remote_path} | Status: {status} | Took: {duration}", mode="both")
     def download_file(self, remote_path: str, local_directory: str):
-        """
-        Downloads a file from Minerva to a local directory using the CLI.
-
-        Args:
-            remote_path (str): The path or ID of the file on the Minerva server.
-            local_directory (str): The local folder where the file should be saved.
-        """
-        # 1. Ensure authentication is valid
-        if not self.auth.token:
-            self.auth.authenticate()
-
-        # 2. Prepare Auth Context for CLI environment variables
-        auth_ctx = {
-            "token": self.auth.token,
-            "password": self.auth.password,
-            "url": self.url,
-            "db": self.db
-        }
-
-        # 3. Construct CLI fragments
-        # --remote: server file path, --path: local target path
-        fragments = [
-            "--remote", remote_path,
-            "--path", local_directory,
-            "--overwrite", "Overwrite"  # Default to overwrite if file exists
-        ]
-
-        #AnsysMinerva_CLI.exe download --no-session --remote \
-        # Ans_SimulationTask/90873DFE38094A759C166530A471B7B9/ans_SimTask_Input \
-        # --url http://vdspdm.sec.samsung.net/AnsysMinerva --overwrite Append
-
-
-        # 4. Execute via CLIExecutor
+        """Executes CLI download with integrated auth context."""
         # The result of this call will be captured by the 'after' log as {return_value}
-        return self.cli.run("download", fragments, auth_context=auth_ctx)
+        return self.cli.download(remote=remote_path, auth=self.cli_auth, local=local_directory)

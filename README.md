@@ -28,13 +28,18 @@ A Python-based web application built with **Dash** for managing and downloading 
 ├── assets/
 │   └── icons/          # SVG icons (archive, download, eye, etc.)
 ├── logic/
-│   ├── core/           # Core modules (auth, cli_executor, odata)
-│   ├── services/       # Service layer (minerva_client, dummy_client)
-│   └── utils/          # Utility functions and decorators
-├── .gitignore          # Git exclusion rules
-├── dash_minerva.py     # Main application entry point
-├── README.md           # Project documentation
-└── requirements.txt    # Python package dependencies
+    ├── core/                   # Low-level engines for system communication
+    │   └── minerva/            # Minerva-specific core modules
+    │       ├── auth.py         # Authentication logic and credential handling
+    │       ├── cli.py          # Functional wrapper for Minerva CLI execution
+    │       └── odata.py        # REST API (OData) communication logic
+    ├── services/               # High-level business logic & client implementations
+    │   ├── dummy_client.py     # Mock client for testing and development
+    │   └── vd_client.py        # Main client for specific business services (e.g., VD)
+    └── utils/                  # Common utilities and helper functions
+        └── decorators.py       # Reusable decorators (e.g., logging, timing)
+dash_minerva.py             # Main entry point (Dash application)
+.env                        # Environment variables (instance URL, DB name, etc.)
 ```
 
 ## ⚙️ Installation & Setup

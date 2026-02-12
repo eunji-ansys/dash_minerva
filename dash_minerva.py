@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 import dash
 from dash import dcc, html, Input, Output, State, callback, clientside_callback, ClientsideFunction, ALL, MATCH, ctx
 import dash_bootstrap_components as dbc
-from logic.services.minerva_client import MinervaClient
+from logic.services.vd_client import VDClient
 #from logic.services.dummy_client import DummyClient
 
 # --- [0. Load Environment Variables] ---
@@ -23,7 +23,7 @@ MINERVA_PASS = os.getenv("MINERVA_PASS")
 TEMP_DOWNLOAD_PATH = os.getenv("TEMP_DOWNLOAD_PATH", "./temp_downloads")
 
 # --- [1. Initialize Minerva Client] ---
-minerva = MinervaClient(MINERVA_URL, MINERVA_DB, MINERVA_USER, MINERVA_PASS)
+minerva = VDClient(MINERVA_URL, MINERVA_DB, MINERVA_USER, MINERVA_PASS)
 #minerva = DummyClient()  # For testing without real server
 
 # --- [2. Helper Functions] ---
