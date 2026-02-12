@@ -1,7 +1,7 @@
 import requests
 import json
 from .auth import MinervaAuth
-from ..utils.decorators import log
+from ...utils.decorators import log
 
 class MinervaODataClient:
     """Handles all OData API operations using an Auth provider."""
