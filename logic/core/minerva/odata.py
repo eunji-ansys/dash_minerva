@@ -1,79 +1,427 @@
-import requests
 import json
-from .auth import MinervaAuth
+import requests
+import hashlib
+from typing import Any, Dict, Iterable, List, Optional, Union
+
 from ...utils.decorators import log
 
-class MinervaODataClient:
-    """Handles all OData API operations using an Auth provider."""
-    def __init__(self, auth_provider: MinervaAuth):
-        self.auth = auth_provider
-        self.api_base = f"{self.auth.base_url}/server/odata"
+Json = Dict[str, Any]
+Params = Dict[str, Any]
+Headers = Dict[str, str]
 
-    def _handle_response(self, response):
-        """Internal helper to parse response objects."""
+class ODataAuth:
+    """Handles OAuth2 authentication and credential management."""
+    def __init__(self, base_url, database, username, password):
+        self.base_url = base_url.rstrip('/')
+        self.database = database
+        self.username = username
+        self.password = password  # Raw password for hashing
+        self.token = None
+        self.headers = {}
+        self.credentials = {
+            "username": username,
+            "database": database,
+            "md5_password": hashlib.md5(password.encode()).hexdigest()
+        }
+
+    def authenticate(self) -> bool:
+        """Authenticates and updates headers. Returns success status."""
+        url = f"{self.base_url}/OAuthServer/connect/token"
+        payload = {
+            'grant_type': 'password',
+            'scope': 'Innovator',
+            'client_id': 'IOMApp',
+            'username': self.credentials["username"],
+            'password': self.credentials["md5_password"],
+            'database': self.credentials["database"]
+        }
+        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+
         try:
-            if response.status_code in [200, 201]:
-                return response.json()
-            elif response.status_code == 204:
-                return {"status": "success", "code": 204}
-            else:
-                raise Exception(f"API Error {response.status_code}: {response.text}")
+            response = requests.post(url, headers=headers, data=payload)
+            if response.status_code == 200:
+                self.token = response.json()["access_token"]
+                self.headers = {
+                    "Database": self.credentials["database"],
+                    "Authorization": f"Bearer {self.token}",
+                    "Accept": "application/json"
+                }
+                return True
+            return False
+        except Exception as e:
+            print(f"Auth Exception: {e}")
+            return False
+
+class MinervaODataClient:
+    """
+    REST-style API client over Minerva OData endpoint.
+
+    Public method names:
+      - list(), get(), list_related(), create(), patch(), delete()
+
+    Internals:
+      - request_raw(): executes HTTP + 401 re-auth retry, returns Response
+      - request_json(): calls request_raw() + raises for status + parses JSON
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        database: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        verify: Union[bool, str] = True,
+        timeout: Union[int, float] = 30,
+        auth: Optional[ODataAuth] = None,
+        session: Optional[requests.Session] = None,
+    ):
+        """
+        Initialize the client.
+
+        If `auth` is provided, it will be used directly (advanced use).
+        Otherwise, this client creates and owns a ODataAuth instance.
+        """
+        self.timeout = timeout
+        self.verify = verify
+        self.api_base = f"{base_url.rstrip('/')}/server/odata"
+
+        if auth is None:
+            if not database:
+                raise ValueError("database is required when auth is not provided")
+            if not username or not password:
+                raise ValueError("username and password are required when auth is not provided")
+
+        self.auth = auth or ODataAuth(
+            base_url=base_url,
+            database=database,
+            username=username,
+            password=password,
+        )
+
+        self.session = session or requests.Session()
+
+    # ------------------------------------------------------------------
+    # Low-level helpers
+    # ------------------------------------------------------------------
+
+    def _default_headers(self) -> Headers:
+        """Return default auth headers."""
+        return dict(self.auth.headers)
+
+    def _merge_headers(
+        self,
+        *,
+        extra_headers: Optional[Headers] = None,
+        headers_override: Optional[Headers] = None,
+    ) -> Headers:
+        """
+        Merge headers with precedence:
+          1) default auth headers
+          2) headers_override replaces the entire dict (if provided)
+          3) extra_headers overwrites/adds keys (if provided)
+        """
+        headers = self._default_headers()
+        if headers_override is not None:
+            headers = dict(headers_override)
+        if extra_headers:
+            headers.update(extra_headers)
+        return headers
+
+    def _raise_for_status(self, response: requests.Response) -> None:
+        """Raise exception if status code indicates failure."""
+        if response.status_code in (200, 201, 204):
+            return
+        raise RuntimeError(f"API Error {response.status_code}: {response.text}")
+
+    def _parse_json(self, response: requests.Response) -> Any:
+        """Parse JSON response; handle 204 No Content."""
+        if response.status_code == 204:
+            return {"status": "success", "code": 204}
+        try:
+            return response.json()
         except json.JSONDecodeError:
-            return {"error": "Invalid JSON response", "content": response.text}
+            raise RuntimeError(f"Invalid JSON response: {response.text}")
 
-    def fetch_data(self, endpoint, select_fields=None, filter_string=None, expand_string=None, retry=True):
-        """Generic GET with auto-reauth on 401."""
-        url = f"{self.api_base}/{endpoint}"
-        params = {}
-        if filter_string: params["$filter"] = filter_string
-        if expand_string: params["$expand"] = expand_string
-        if select_fields:
-            params["$select"] = ",".join(select_fields) if isinstance(select_fields, list) else select_fields
+    def _build_odata_params(
+        self,
+        *,
+        select: Optional[Union[str, Iterable[str]]] = None,
+        filter: Optional[str] = None,
+        expand: Optional[str] = None,
+        top: Optional[int] = None,
+        skip: Optional[int] = None,
+        orderby: Optional[str] = None,
+        count: Optional[bool] = None,
+    ) -> Params:
+        """Build OData query parameters."""
+        params: Params = {}
+        if filter:
+            params["$filter"] = filter
+        if expand:
+            params["$expand"] = expand
+        if select:
+            params["$select"] = select if isinstance(select, str) else ",".join(select)
+        if top is not None:
+            params["$top"] = top
+        if skip is not None:
+            params["$skip"] = skip
+        if orderby:
+            params["$orderby"] = orderby
+        if count is not None:
+            params["$count"] = "true" if count else "false"
+        return params
 
-        response = requests.get(url, headers=self.auth.headers, params=params)
+    # ------------------------------------------------------------------
+    # request_raw / request_json
+    # ------------------------------------------------------------------
 
-        if response.status_code == 401 and retry:
+    def request_raw(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[Params] = None,
+        json_body: Optional[Json] = None,
+        extra_headers: Optional[Headers] = None,
+        headers_override: Optional[Headers] = None,
+        retry_401: bool = True,
+    ) -> requests.Response:
+        """
+        Execute an HTTP request and return the raw Response.
+
+        Handles:
+          - header composition
+          - one-time 401 re-auth retry
+        """
+        url = f"{self.api_base}/{path.lstrip('/')}"
+        headers = self._merge_headers(extra_headers=extra_headers, headers_override=headers_override)
+
+        response = self.session.request(
+            method=method,
+            url=url,
+            headers=headers,
+            params=params,
+            json=json_body,
+            timeout=self.timeout,
+            verify=self.verify,
+        )
+
+        if response.status_code == 401 and retry_401:
             if self.auth.authenticate():
-                return self.fetch_data(endpoint, select_fields, filter_string, expand_string, retry=False)
+                # Token may change after re-auth; rebuild headers and retry once.
+                return self.request_raw(
+                    method,
+                    path,
+                    params=params,
+                    json_body=json_body,
+                    extra_headers=extra_headers,
+                    headers_override=headers_override,
+                    retry_401=False,
+                )
+
         return response
 
-    # --- CRUD & Specialized Helpers ---
-    def get_item_list(self, item_name, **kwargs):
-        resp = self.fetch_data(item_name, **kwargs)
-        return self._handle_response(resp).get("value", [])
+    def request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[Params] = None,
+        json_body: Optional[Json] = None,
+        extra_headers: Optional[Headers] = None,
+        headers_override: Optional[Headers] = None,
+        retry_401: bool = True,
+    ) -> Any:
+        """
+        Execute an HTTP request and return parsed JSON (or a success dict for 204).
 
-    def get_item_by_id(self, item_name, item_id, **kwargs):
-        endpoint = f"{item_name}('{item_id}')"
-        resp = self.fetch_data(endpoint, **kwargs)
-        return self._handle_response(resp)
+        Raises:
+          - RuntimeError for non-success status codes
+          - RuntimeError for invalid JSON payloads
+        """
+        response = self.request_raw(
+            method,
+            path,
+            params=params,
+            json_body=json_body,
+            extra_headers=extra_headers,
+            headers_override=headers_override,
+            retry_401=retry_401,
+        )
+        self._raise_for_status(response)
+        return self._parse_json(response)
 
-    def get_linked_items(self, item_name, item_id, relationship_name, **kwargs):
-        endpoint = f"{item_name}('{item_id}')/{relationship_name}"
-        resp = self.fetch_data(endpoint, **kwargs)
-        data = self._handle_response(resp)
-        return data.get("value", [])
+    # ------------------------------------------------------------------
+    # REST-style public API
+    # ------------------------------------------------------------------
 
-    def create(self, item_name, payload):
-        url = f"{self.api_base}/{item_name}"
-        resp = requests.post(url, headers=self.auth.headers, json=payload)
-        return self._handle_response(resp)
+    def list(
+        self,
+        resource: str,
+        *,
+        select: Optional[Union[str, Iterable[str]]] = None,
+        filter: Optional[str] = None,
+        expand: Optional[str] = None,
+        top: Optional[int] = None,
+        skip: Optional[int] = None,
+        orderby: Optional[str] = None,
+        count: Optional[bool] = None,
+    ) -> List[Json]:
+        """List resources from a collection endpoint."""
+        params = self._build_odata_params(
+            select=select,
+            filter=filter,
+            expand=expand,
+            top=top,
+            skip=skip,
+            orderby=orderby,
+            count=count,
+        )
+        data = self.request_json("GET", resource, params=params)
+        return data.get("value", []) if isinstance(data, dict) else []
 
-    def update(self, item_name, item_id, payload):
-        url = f"{self.api_base}/{item_name}('{item_id}')"
-        resp = requests.patch(url, headers=self.auth.headers, json=payload)
-        return self._handle_response(resp)
+    def get(
+        self,
+        resource: str,
+        resource_id: str,
+        *,
+        select: Optional[Union[str, Iterable[str]]] = None,
+        expand: Optional[str] = None,
+    ) -> Json:
+        """Get a single resource by id."""
+        params = self._build_odata_params(select=select, expand=expand)
+        path = f"{resource}('{resource_id}')"
+        data = self.request_json("GET", path, params=params)
+        return data if isinstance(data, dict) else {"value": data}
 
-    def delete(self, item_name, item_id, purge=False):
-        url = f"{self.api_base}/{item_name}('{item_id}')"
-        headers = self.auth.headers.copy()
-        if purge: headers["@aras.action"] = "purge"
-        resp = requests.delete(url, headers=headers)
-        return resp.status_code
+    def list_related(
+        self,
+        resource: str,
+        resource_id: str,
+        related: str,
+        *,
+        select: Optional[Union[str, Iterable[str]]] = None,
+        filter: Optional[str] = None,
+        expand: Optional[str] = None,
+        top: Optional[int] = None,
+        skip: Optional[int] = None,
+        orderby: Optional[str] = None,
+        count: Optional[bool] = None,
+    ) -> List[Json]:
+        """List related resources via a subresource/navigation path."""
+        params = self._build_odata_params(
+            select=select,
+            filter=filter,
+            expand=expand,
+            top=top,
+            skip=skip,
+            orderby=orderby,
+            count=count,
+        )
+        path = f"{resource}('{resource_id}')/{related}"
+        data = self.request_json("GET", path, params=params)
+        return data.get("value", []) if isinstance(data, dict) else []
 
-   # --- List Item ---
-    def get_list_values(self, list_id):
-        endpoint = f"List('{list_id}')/Value"
-        resp = self.fetch_data(endpoint, select_fields=["value", "label"])
-        data = self._handle_response(resp)
-        items = data.get("value", [])
+    def create(self, resource: str, payload: Json) -> Json:
+        """Create a resource."""
+        data = self.request_json("POST", resource, json_body=payload)
+        return data if isinstance(data, dict) else {"value": data}
+
+    def patch(self, resource: str, resource_id: str, payload: Json) -> Json:
+        """Partially update a resource (PATCH semantics)."""
+        path = f"{resource}('{resource_id}')"
+        data = self.request_json("PATCH", path, json_body=payload)
+        return data if isinstance(data, dict) else {"value": data}
+
+    def delete(self, resource: str, resource_id: str, *, purge: bool = False) -> int:
+        """
+        Delete a resource. Returns HTTP status code.
+
+        purge is Aras-specific; implemented via extra header.
+        """
+        path = f"{resource}('{resource_id}')"
+        extra_headers = {"@aras.action": "purge"} if purge else None
+
+        response = self.request_raw("DELETE", path, extra_headers=extra_headers)
+        # If you want delete() to raise on non-2xx/204, uncomment:
+        # self._raise_for_status(response)
+        return response.status_code
+
+    # ------------------------------------------------------------------
+    # Convenience helpers
+    # ------------------------------------------------------------------
+
+    def update(self, resource: str, resource_id: str, payload: Json) -> Json:
+        """Alias for patch()."""
+        return self.patch(resource, resource_id, payload)
+
+    def list_values(self, list_id: str) -> List[Dict[str, Any]]:
+        """Aras list helper implemented via REST-style list_related()."""
+        items = self.list_related("List", list_id, "Value", select=["value", "label"])
         return [{"label": i.get("label"), "value": i.get("value")} for i in items]
+
+
+    Json = Dict[str, Any]
+
+    def iter_list(
+        self,
+        entity_set: str,
+        *,
+        page_size: int = 100,
+        max_items: Optional[int] = None,
+        select: Optional[Union[str, Iterable[str]]] = None,
+        filter: Optional[str] = None,
+        expand: Optional[str] = None,
+        orderby: Optional[str] = None,
+        count: Optional[bool] = None,
+    ) -> Iterable[Json]:
+        """
+        Iterate items from an OData entity set using $top/$skip pagination.
+
+        Assumptions:
+        - self.list(...) returns List[Json] (already extracted list of items),
+        not a raw OData payload like {"value": [...]}.
+        - self.list(...) accepts keyword argument 'filter' (not 'filter_').
+        """
+        if page_size <= 0:
+            raise ValueError("page_size must be > 0")
+
+        # If max_items is 0 or negative, yield nothing.
+        if max_items is not None and max_items <= 0:
+            return
+
+        yielded = 0
+        skip = 0
+
+        while True:
+            # Fetch a page of items.
+            items = self.list(
+                entity_set,
+                select=select,
+                filter=filter,
+                expand=expand,
+                top=page_size,
+                skip=skip,
+                orderby=orderby,
+                count=count,
+            )
+
+            # No items means we're done.
+            if not items:
+                break
+
+            for item in items:
+                yield item
+                yielded += 1
+
+                # Stop once we've yielded enough items.
+                if max_items is not None and yielded >= max_items:
+                    return
+
+            # Advance the offset by the number of items we just received.
+            skip += len(items)
+
+            # If the server returned fewer than page_size items, assume last page.
+            if len(items) < page_size:
+                break
