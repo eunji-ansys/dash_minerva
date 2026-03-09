@@ -3,7 +3,9 @@ import requests
 import hashlib
 from typing import Any, Dict, Iterable, List, Optional, Union
 
+import logging
 from ...utils.decorators import log
+logging.basicConfig(level=logging.DEBUG, format='%(levelname)s: %(message)s')
 
 Json = Dict[str, Any]
 Params = Dict[str, Any]
@@ -197,6 +199,7 @@ class MinervaODataClient:
         url = f"{self.api_base}/{path.lstrip('/')}"
         headers = self._merge_headers(extra_headers=extra_headers, headers_override=headers_override)
 
+        #logging.debug(f"Request: {method} {url} params={params} json={json_body}")
         response = self.session.request(
             method=method,
             url=url,
@@ -233,13 +236,6 @@ class MinervaODataClient:
         headers_override: Optional[Headers] = None,
         retry_401: bool = True,
     ) -> Any:
-        """
-        Execute an HTTP request and return parsed JSON (or a success dict for 204).
-
-        Raises:
-          - RuntimeError for non-success status codes
-          - RuntimeError for invalid JSON payloads
-        """
         response = self.request_raw(
             method,
             path,
@@ -303,13 +299,20 @@ class MinervaODataClient:
         *,
         select: Optional[Union[str, Iterable[str]]] = None,
         filter: Optional[str] = None,
-        expand: Optional[str] = None,
+        expand: Optional[str] = "related_id($select=id, keyed_name)",
         top: Optional[int] = None,
         skip: Optional[int] = None,
         orderby: Optional[str] = None,
         count: Optional[bool] = None,
     ) -> List[Json]:
-        """List related resources via a subresource/navigation path."""
+        """
+        List related resources via a subresource/navigation path.
+
+        Notes:
+        - Relationship collections typically return relationship rows.
+        - When `$expand=related_id(...)` is used, the actual target item is
+          contained inside the expanded `related_id` field.
+        """
         params = self._build_odata_params(
             select=select,
             filter=filter,
@@ -321,7 +324,28 @@ class MinervaODataClient:
         )
         path = f"{resource}('{resource_id}')/{related}"
         data = self.request_json("GET", path, params=params)
-        return data.get("value", []) if isinstance(data, dict) else []
+
+        if not isinstance(data, dict):
+            return []
+
+        rel_rows = data.get("value", [])
+        if not isinstance(rel_rows, list):
+            return []
+
+        # Extract expanded related_id items; flatten if related_id expands to a list.
+        expanded: List[Json] = []
+        for i, row in enumerate(rel_rows):
+            if not isinstance(row, dict):
+                continue
+            rid = row.get("related_id")
+            if not rid:
+                expanded.append(row)  # No related_id means we return the relationship row itself.
+            elif isinstance(rid, list):
+                expanded.extend([x for x in rid if isinstance(x, dict)])
+            elif isinstance(rid, dict):
+                expanded.append(rid)
+
+        return expanded
 
     def create(self, resource: str, payload: Json) -> Json:
         """Create a resource."""
@@ -358,7 +382,7 @@ class MinervaODataClient:
 
     def list_values(self, list_id: str) -> List[Dict[str, Any]]:
         """Aras list helper implemented via REST-style list_related()."""
-        items = self.list_related("List", list_id, "Value", select=["value", "label"])
+        items = self.list_related("List", list_id, "Value", select=["value", "label"], expand=None)
         return [{"label": i.get("label"), "value": i.get("value")} for i in items]
 
 
@@ -425,3 +449,19 @@ class MinervaODataClient:
             # If the server returned fewer than page_size items, assume last page.
             if len(items) < page_size:
                 break
+
+    def download(self, vault_id: str, dest: str):
+        path = f"File('{vault_id}')/$value"
+        response = self.request_raw("GET", path)
+        print(f"status: {response.status_code} dest: {dest}")
+        self._raise_for_status(response)
+
+        with open(dest, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+
+        print(f"Downloaded {vault_id} -> {dest}")
+        return response.status_code
+
+

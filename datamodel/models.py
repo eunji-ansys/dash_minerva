@@ -71,7 +71,7 @@ class FileNode:
     is_folder: bool
     size: int = 0
     depth: int = 0
-    file_id: Optional[str] = None
+    vault_id: Optional[str] = None
     classification: Optional[str] = None
 
 

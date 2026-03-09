@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, List
 
-from logic.services.ootb_service import OOTBDisplayPolicy, OOTBService, BadgeSpec, SummarySpec, TenantMapping, get_item_type
+from logic.services.ootb_service import OOTBDisplayPolicy, OOTBService, BadgeSpec, SummarySpec, TenantMapping, FilterSpec, get_item_type, normalize_options
 from datamodel.models import NodeKind, NodeRef, Summary, DetailsData, ChildrenResult
 
 import logging
@@ -77,6 +77,32 @@ class VDService(OOTBService):
         # Patch display policy to include VD-only item types
         self.display_policy = VDDisplayPolicy(OOTBDisplayPolicy(self.mapping), self.mapping)
 
+    def get_filter_spec(self) -> FilterSpec:
+        year_opts = normalize_options(self.get_filter_years())
+        product_opts = normalize_options(self.get_filter_products())
+
+        year_default = year_opts[-1]["value"] if year_opts else None
+        product_default = None
+
+        return {
+            "year": {
+                "enabled": True,
+                "label": "Year",
+                "options": year_opts,
+                "default": year_default,
+                "placeholder": "Select year",
+                "multi": False,
+            },
+            "product": {
+                "enabled": True,
+                "label": "Product",
+                "options": product_opts,
+                "default": product_default,
+                "placeholder": "Select product",
+                "multi": False,
+            },
+        }
+
     def list_level0(self, *, year: Optional[int] = None, product: Optional[str] = None) -> List[NodeRef]:
         """Return Project nodes"""
         filters = []
@@ -148,45 +174,45 @@ class VDService(OOTBService):
             for r in rows
         ]
 
-    # def _children_sr_to_wr(self, node_id: str) -> List[NodeRef]:
-    #     rows = self.odata.list_related(self.mapping.sr_item_type, node_id, self.mapping.rel_sr_to_wr)
-    #     return [
-    #         NodeRef(
-    #             id=str(r["id"]),
-    #             kind=NodeKind.LEVEL2,
-    #             summary=self._to_summary(r, fallback_title="Item"),
-    #             item_type=self.mapping.wr_item_type,
-    #             role="WR",
-    #             can_expand=None,
-    #         )
-    #         for r in rows
-    #     ]
-
     def _children_sr_to_wr(self, node_id: str) -> List[NodeRef]:
-        expand_str = "related_id($select=id,item_number,name,classification,created_on,current_state,owned_by_id,_simulation_type)"
-        rows = self.odata.list_related(
-            self.mapping.sr_item_type,
-            node_id,
-            self.mapping.rel_sr_to_wr,
-            expand=expand_str,
-        )
-
-        out: List[NodeRef] = []
-        for r in rows:
-            rel = r.get("related_id") or {}
-            wr_id = rel.get("id")
-            if not wr_id:
-                # related_id가 비어있으면 skip (데이터 품질 문제 / expand 실패 등)
-                continue
-
-            out.append(
-                NodeRef(
-                    id=str(wr_id),
-                    kind=NodeKind.LEVEL2,
-                    summary=self._to_summary(rel, fallback_title="Item"),
-                    item_type=self.mapping.wr_item_type,
-                    role="WR",
-                    can_expand=None,
-                )
+        rows = self.odata.list_related(self.mapping.sr_item_type, node_id, self.mapping.rel_sr_to_wr)
+        return [
+            NodeRef(
+                id=str(r["id"]),
+                kind=NodeKind.LEVEL2,
+                summary=self._to_summary(r, fallback_title="Item"),
+                item_type=self.mapping.wr_item_type,
+                role="WR",
+                can_expand=None,
             )
-        return out
+            for r in rows
+        ]
+
+    # def _children_sr_to_wr(self, node_id: str) -> List[NodeRef]:
+    #     expand_str = "related_id($select=id,item_number,name,classification,created_on,current_state,owned_by_id,_simulation_type)"
+    #     rows = self.odata.list_related(
+    #         self.mapping.sr_item_type,
+    #         node_id,
+    #         self.mapping.rel_sr_to_wr,
+    #         expand=expand_str,
+    #     )
+
+    #     out: List[NodeRef] = []
+    #     for r in rows:
+    #         rel = r.get("related_id") or {}
+    #         wr_id = rel.get("id")
+    #         if not wr_id:
+    #             # related_id가 비어있으면 skip (데이터 품질 문제 / expand 실패 등)
+    #             continue
+
+    #         out.append(
+    #             NodeRef(
+    #                 id=str(wr_id),
+    #                 kind=NodeKind.LEVEL2,
+    #                 summary=self._to_summary(rel, fallback_title="Item"),
+    #                 item_type=self.mapping.wr_item_type,
+    #                 role="WR",
+    #                 can_expand=None,
+    #             )
+    #         )
+    #     return out

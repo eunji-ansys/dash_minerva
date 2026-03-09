@@ -106,14 +106,18 @@ def main() -> int:
     # This requires a known navigation property/relationship name.
     # Example: List('{id}')/Value is often valid.
     try:
-        print("[4] LIST_RELATED Ans_SimulationRequest('{id}')/Ans_SimReq_Task (top=5)")
+        print("[2] LIST 'Ans_SimulationTask' (top=10, select=id,name,keyed_name)")
+        items = client.list("Ans_SimulationTask", top=10, select=["id", "name"])
+        print("  Items:", str(items))
+
+        print("[4] LIST_RELATED Ans_SimulationTask('{id}')/Ans_SimTask_Input (top=5)")
         for i, item in enumerate(items):
             # reuse a list id from previous call
             list_id = item["id"]
             if not list_id:
                 print("  Skipped: no List items returned.")
             else:
-                related_items = client.list_related("Ans_SimulationRequest", list_id, "Ans_SimReq_Task", select=["id", "keyed_name"])
+                related_items = client.list_related("Ans_SimulationTask", list_id, "ans_SimTask_Input", select=["id", "keyed_name"], expand=None)
                 print(f"[4.{i}]  Related count:", len(related_items))
                 print(f"[4.{i}]  First related:", pretty(related_items[0] if related_items else None))
             print()

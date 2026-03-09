@@ -1,6 +1,10 @@
 import re
 import os
+import uuid
+import shutil
+from pathlib import Path
 import math
+from typing import Any, List, TypedDict, TypeAlias
 from dotenv import load_dotenv
 
 import dash
@@ -14,7 +18,6 @@ from logic.services.service_factory import get_service
 from datamodel.models import NodeRef, NodeKind, DetailsData, FileNode, FileSet, Summary, Badge
 
 print("### RUNNING DASH FILE:", __file__)
-print("### VERSION TAG: 2026-03-05-download-debug-1")
 
 # --- [0. Load Environment Variables] ---
 load_dotenv()
@@ -23,7 +26,29 @@ TEMP_DOWNLOAD_PATH = os.getenv("TEMP_DOWNLOAD_PATH", "./temp_downloads")
 # --- [1. Build service (tenant-agnostic) ] ---
 service = get_service()
 
+print("### Service initialized:", service)
+
 # --- [2. Helper Functions] ---
+
+
+class OptionSpec(TypedDict):
+    label: str
+    value: Any
+
+
+class FilterFieldSpec(TypedDict, total=False):
+    label: str
+    enabled: bool
+    options: List[OptionSpec]
+    default: Any
+    placeholder: str  # optional UI hint
+    multi: bool
+    component: str   # "dropdown", "input", "radio" etc. (optional UI hint)
+
+
+FilterSpec: TypeAlias = dict[str, FilterFieldSpec]
+Filters: TypeAlias = dict[str, Any]
+
 
 FIXED_VIEWER_CONFIG = {
     ".pdf": "PDF_VIEWER",
@@ -33,8 +58,7 @@ FIXED_VIEWER_CONFIG = {
 }
 PATTERN_VIEWER_CONFIG = [
     (r"\.s\d+p", "TOUCHSTONE_VIEWER"),
-    (r"\.v\d+", "VERSION_VIEWER"),
-    (r"\.r\d{2,3}x", "SPEC_VIEWER"),
+    (r"\.v\d+", "VERSION_VIEWER")
 ]
 
 def get_viewer_type_by_ext(file_name: str | None):
@@ -102,6 +126,29 @@ def merge_node_map(old_map: dict, nodes: list[NodeRef]) -> dict:
     for n in nodes:
         new_map[n.id] = node_to_dict(n)
     return new_map
+
+
+def build_node_map(nodes: list[NodeRef]) -> dict:
+    return {n.id: node_to_dict(n) for n in nodes}
+
+
+def build_filters(filter_values, filter_ids) -> Filters:
+    return {
+        fid["name"]: value
+        for fid, value in zip(filter_ids or [], filter_values or [])
+        if isinstance(fid, dict) and fid.get("name")
+    }
+
+
+def resolve_default_value(spec: FilterFieldSpec) -> Any:
+    if "default" in spec:
+        return spec["default"]
+
+    options = spec.get("options", [])
+    if options:
+        return options[-1]["value"]
+
+    return None
 
 
 # ---- Summary rendering helpers ----
@@ -189,6 +236,7 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
         file_id = f.id
         file_name = f.name
         is_folder = f.is_folder
+        vault_id = f.vault_id
         depth = f.depth or 0
         file_size = f.size or 0
 
@@ -238,7 +286,7 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
                                         src=dash.get_asset_url("icons/folder-download.svg" if is_folder else "icons/download.svg"),
                                         style={"width": "14px"},
                                     ),
-                                    id={"type": "btn-download", "index": file_id, "file_name": file_name, "category": category, "is_folder": is_folder,},
+                                    id={"type": "btn-download", "index": file_id, "file_name": file_name, "category": category, "is_folder": is_folder, "vault_id":vault_id},
                                     n_clicks=0,
                                     color="white",
                                     size="sm",
@@ -301,6 +349,8 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
 )
 
+
+
 app.layout = dbc.Container(
     [
         dcc.Store(id="store-node-by-id", data={}),
@@ -313,14 +363,8 @@ app.layout = dbc.Container(
                             [
                                 html.Div(
                                     [
-                                        html.H4("Filters", className="fw-bold mb-3"),
-                                        dbc.Row(
-                                            [
-                                                dbc.Col([dcc.Dropdown(id="filter-year", placeholder="Year", clearable=True, style={"fontSize": "13px"})], width=5),
-                                                dbc.Col([dcc.Dropdown(id="filter-product", placeholder="Product", clearable=True, style={"fontSize": "13px"})], width=7),
-                                            ],
-                                            className="g-2 mb-3 align-items-center",
-                                        ),
+                                        html.H4("Projects", className="fw-bold mb-3"),
+                                        dbc.Row(id="filter-container", className="g-2 mb-3"),
                                         html.Hr(className="mt-2"),
                                     ],
                                     style={"flex": "0 0 auto", "padding": "0 5px"},
@@ -395,35 +439,45 @@ app.layout = dbc.Container(
 )
 
 # --- [4. Callback Logic] ---
+def build_filter_components(filter_spec: FilterSpec) -> list:
+    children = []
+
+    for field_name, spec in filter_spec.items():
+        if not spec.get("enabled", True):
+            continue
+
+        component_type = spec.get("component", "dropdown")
+
+        if component_type != "dropdown":
+            continue
+
+        children.append(
+            dbc.Col(
+                [
+                    dbc.Label(spec.get("label", field_name.title())),
+                    dcc.Dropdown(
+                        id={"type": "dynamic-filter", "name": field_name},
+                        options=spec.get("options", []),
+                        value=resolve_default_value(spec),
+                        placeholder=spec.get("placeholder", f"Select {field_name}"),
+                        multi=spec.get("multi", False),
+                        clearable=True,
+                        style={"width": "100%"},
+                    ),
+                ],
+            )
+        )
+
+    return children
 
 @callback(
-    [Output("filter-year", "options"), Output("filter-product", "options")],
-    Input("filter-year", "id"),
+    Output("filter-container", "children"),
+    Input("filter-container", "id"),
     prevent_initial_call=False,
 )
-def initialize_filter_dropdowns(_):
-    year_options = []
-    product_options = []
-
-    if hasattr(service, "get_filter_years"):
-        try:
-            year_options = service.get_filter_years() or []
-        except Exception:
-            year_options = []
-
-    if hasattr(service, "get_filter_products"):
-        try:
-            product_options = service.get_filter_products() or []
-        except Exception:
-            product_options = []
-
-    if not year_options:
-        year_options = [{"label": "N/A", "value": None}]
-    if not product_options:
-        product_options = [{"label": "N/A", "value": None}]
-
-    return year_options, product_options
-
+def render_filters(_):
+    filter_spec = service.get_filter_spec() or {}
+    return build_filter_components(filter_spec)
 
 def render_level0_item(node: NodeRef, details: DetailsData | None = None):
     title = node.summary.title
@@ -455,7 +509,7 @@ def render_level0_item(node: NodeRef, details: DetailsData | None = None):
                         ],
                         style={"flex": "1", "minWidth": "0"},
                     ),
-                    *badge_components,  # ← 리스트 전체 표시
+                    *badge_components,  # Bage list
                 ],
                 className="d-flex justify-content-between align-items-center",
             )
@@ -467,21 +521,30 @@ def render_level0_item(node: NodeRef, details: DetailsData | None = None):
 
 
 @callback(
-    [Output("level0-list-container", "children"), Output("store-node-by-id", "data")],
-    [Input("filter-year", "value"), Input("filter-product", "value")],
-    State("store-node-by-id", "data"),
-    prevent_initial_call=True,
+    Output("level0-list-container", "children"),
+    Output("store-node-by-id", "data"),
+    Input({"type": "dynamic-filter", "name": ALL}, "value"),
+    State({"type": "dynamic-filter", "name": ALL}, "id"),
+    prevent_initial_call=False,
 )
-def update_level0_list(selected_year, selected_product, node_map):
+def update_level0_list(filter_values, filter_ids):
+    filters = build_filters(filter_values, filter_ids)
+
     try:
-        level0_nodes = service.list_level0(year=selected_year, product=selected_product)
+        level0_nodes = service.list_level0(filters=filters)
     except TypeError:
-        level0_nodes = service.list_level0()
+        try:
+            level0_nodes = service.list_level0(
+                year=filters.get("year"),
+                product=filters.get("product"),
+            )
+        except TypeError:
+            level0_nodes = service.list_level0()
 
     if not level0_nodes:
-        return html.Div("No items found.", className="text-muted p-3 small text-center"), node_map or {}
+        return html.Div("No items found.", className="text-muted p-3 small text-center"), {}
 
-    node_map = merge_node_map(node_map, level0_nodes)
+    node_map = build_node_map(level0_nodes)
     items = [render_level0_item(n, details=None) for n in level0_nodes]
     return dbc.ListGroup(items, flush=True), node_map
 
@@ -755,48 +818,32 @@ import shutil
         Output("loading-output-target", "children"),
     ],
     Input(
-        {"type": "btn-download", "index": ALL, "file_name": ALL, "category": ALL, "is_folder": ALL},
+        {"type": "btn-download", "index": ALL, "file_name": ALL, "category": ALL, "is_folder": ALL, "vault_id": ALL},
         "n_clicks",
     ),
     State(
-        {"type": "btn-download", "index": ALL, "file_name": ALL, "category": ALL, "is_folder": ALL},
+        {"type": "btn-download", "index": ALL, "file_name": ALL, "category": ALL, "is_folder": ALL, "vault_id": ALL},
         "id",
     ),
     prevent_initial_call=True,
 )
 def handle_file_download(n_clicks_list, id_list):
-    print("DOWNLOAD FIRED", n_clicks_list, ctx.triggered_id)
-
     if not n_clicks_list or not any(n_clicks_list):
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update
-
     info = None
 
-    # 1) Dash 2.4+ : ctx.triggered_id 사용 가능하면 그걸 우선 사용
-    try:
-        if isinstance(ctx.triggered_id, dict):
-            info = ctx.triggered_id
-    except Exception:
-        info = None
+    if isinstance(ctx.triggered_id, dict):
+        info = ctx.triggered_id
 
-    # 2) 구버전/환경: callback_context.triggered 의 prop_id에서 JSON 파싱
-    if not info:
-        try:
-            trig = dash.callback_context.triggered
-            if trig:
-                prop_id = trig[0].get("prop_id", "")
-                # prop_id 예: '{"type":"btn-download","index":"...","file_name":"..."}\.n_clicks'
-                id_part = prop_id.split(".")[0]
-                info = json.loads(id_part)
-        except Exception:
-            info = None
-
-    # 3) 최후의 fallback: n_clicks가 가장 큰 버튼
+    # n_clicks is the largest button
     if not info:
         i = max(range(len(n_clicks_list)), key=lambda k: (n_clicks_list[k] or 0))
         info = (id_list or [None] * len(n_clicks_list))[i] or {}
 
+    print("DOWNLOAD FIRED", n_clicks_list, ctx.triggered_id)
+
     file_id = info.get("index")
+    vault_id = info.get("vault_id")
     category = info.get("category", "files")
     file_name = info.get("file_name")
     is_folder = bool(info.get("is_folder", False))
@@ -804,41 +851,66 @@ def handle_file_download(n_clicks_list, id_list):
     if not file_id:
         return dash.no_update, True, "Download failed: cannot resolve clicked file id.", ""
 
-    if not hasattr(service, "download_file"):
-        return dash.no_update, True, "Download is not supported by the current service implementation.", ""
-
     try:
         os.makedirs(TEMP_DOWNLOAD_PATH, exist_ok=True)
 
-        # (권장) 동일 이름 잔재 제거 → input/output 최신파일 오탐 방지
-        if file_name:
-            expected = os.path.join(TEMP_DOWNLOAD_PATH, file_name)
-            if os.path.exists(expected):
-                if os.path.isdir(expected):
-                    shutil.rmtree(expected)
-                else:
-                    os.remove(expected)
+        # Create an isolated work directory for this download request.
+        request_id = str(uuid.uuid4().hex.upper())
+        request_dir = os.path.join(TEMP_DOWNLOAD_PATH, request_id)
+        os.makedirs(request_dir, exist_ok=True)
 
-        # ✅ Ans_Data id로 download (local_file 안 씀)
-        service.download_file(file_id, local_dir=TEMP_DOWNLOAD_PATH)
+        # Target path inside the isolated request directory.
+        target_path = os.path.join(request_dir, file_name) if file_name else None
 
-        # file_name이 있으면 그걸로 먼저 찾고
-        target_path = os.path.join(TEMP_DOWNLOAD_PATH, file_name) if file_name else None
+        if is_folder:
+            service.download_to_server_via_cli(ans_data_id=file_id, dest=request_dir)
 
-        # 없으면 fallback: temp 아래 최신 파일/폴더
-        if (not target_path) or (not os.path.exists(target_path)):
-            candidates = glob.glob(os.path.join(TEMP_DOWNLOAD_PATH, "**", "*"), recursive=True)
-            candidates = [p for p in candidates if os.path.basename(p) not in [".", ".."]]
-            if not candidates:
-                return dash.no_update, True, "Downloaded content not found in temp folder.", ""
-            target_path = max(candidates, key=os.path.getmtime)
+            if not target_path or not os.path.exists(target_path):
+                return (
+                    dash.no_update,
+                    True,
+                    f"[{category.upper()}] Downloaded folder not found: {file_name}",
+                    "",
+                )
 
-        if os.path.isdir(target_path):
-            base = os.path.join(TEMP_DOWNLOAD_PATH, os.path.basename(target_path))
-            zip_path = shutil.make_archive(base, "zip", target_path)
-            return dcc.send_file(zip_path), True, f"[{category.upper()}] Folder zipped; download started.", ""
+            if os.path.isdir(target_path):
+                # Create zip outside the source folder but still inside the same request directory.
+                zip_base = os.path.join(request_dir, Path(target_path).name)
+                zip_path = shutil.make_archive(
+                    base_name=zip_base,
+                    format="zip",
+                    root_dir=os.path.dirname(target_path),
+                    base_dir=os.path.basename(target_path),
+                )
+                return (
+                    dcc.send_file(zip_path),
+                    True,
+                    f"[{category.upper()}] Folder zipped; download started.",
+                    "",
+                )
+        else:
+            if not target_path:
+                return (
+                    dash.no_update,
+                    True,
+                    f"[{category.upper()}] File name is missing.",
+                    "",
+                )
+            service.download_to_server_via_odata(vault_id=vault_id, dest=target_path)
+            if not os.path.exists(target_path):
+                return (
+                    dash.no_update,
+                    True,
+                    f"[{category.upper()}] Download failed: file not found after OData download.",
+                    "",
+                )
 
-        return dcc.send_file(target_path), True, f"[{category.upper()}] File download started.", ""
+            return (
+                dcc.send_file(target_path),
+                True,
+                f"[{file_name}] Download started.",
+                "",
+            )
 
     except Exception as e:
         return dash.no_update, True, f"Transfer failed: {e}", ""

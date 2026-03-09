@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Iterable, List, Protocol, Sequence
+from typing import Any, Callable, Optional, Iterable, List, Protocol, Sequence, Dict, TypeAlias, TypedDict
 
 from datamodel.models import FileSet, NodeKind, NodeRef, Summary, Badge, DetailsData, ChildrenResult, FileNode
 from logic.core.minerva.odata import MinervaODataClient
@@ -26,13 +26,43 @@ class TenantMapping:
     rel_wr_to_task: str = "Ans_SimReq_Task"
     rel_wr_to_input: str = "Ans_SimReq_Input"
     rel_wr_to_output: str = "Ans_SimReq_Deliverable"
-    rel_task_to_input: str = "Ans_SimTask_Input"
-    rel_task_to_output: str = "Ans_SimTask_Output"
+    rel_task_to_input: str = "ans_SimTask_Input"
+    rel_task_to_output: str = "ans_SimTask_Output"
     rel_data_to_child_data: str = "Ans_DataChild"
 
 
-TextFormatter = Callable[[Any, dict], Any]
+class OptionSpec(TypedDict):
+    label: str
+    value: Any
 
+class FilterFieldSpec(TypedDict, total=False):
+    label: str
+    enabled: bool
+    options: List[OptionSpec]
+    default: Any
+    placeholder: str  # optional UI hint
+    multi: bool
+    component: str   # "dropdown", "input", "radio" etc. (optional UI hint)
+
+FilterSpec: TypeAlias = dict[str, FilterFieldSpec]
+
+def normalize_options(raw: Any) -> List[OptionSpec]:
+        """
+        Normalize into Dash dropdown options: [{"label": ..., "value": ...}, ...]
+        """
+        if not raw:
+            return []
+        if isinstance(raw, list):
+            if all(isinstance(x, dict) and "label" in x and "value" in x for x in raw):
+                return raw
+            # allow list of primitives
+            out: List[OptionSpec] = []
+            for x in raw:
+                out.append({"label": str(x), "value": x})
+            return out
+        return []
+
+TextFormatter = Callable[[Any, dict], Any]
 
 @dataclass(frozen=True)
 class BadgeSpec:
@@ -153,6 +183,8 @@ class OOTBDisplayPolicy:
         return builder()
 
 
+
+
 class OOTBService:
     """
     Provides UI contract for OOTB Minerva schema.
@@ -189,9 +221,13 @@ class OOTBService:
         # Display policy (summary/badges)
         self.display_policy = OOTBDisplayPolicy(self.mapping)
 
+    def get_filter_spec(self) -> FilterSpec:
+        # Default: filters are not supported
+        return {}
+
     # ---------------- UI Contract ----------------
 
-    def list_level0(self, *, year: Optional[int] = None, product: Optional[str] = None) -> List[NodeRef]:
+    def list_level0(self, *, filters: Optional[dict[str, Any]] = None) -> List[NodeRef]:
         """Return Project nodes"""
         rows = self.odata.list(self.mapping.project_item_type)
         return [
@@ -201,7 +237,7 @@ class OOTBService:
                 summary=self._to_summary(r, fallback_title="Item"),
                 item_type=self.mapping.project_item_type,
                 role="Project",
-                can_expand=None,
+                can_expand=True,
             )
             for r in rows
         ]
@@ -224,13 +260,13 @@ class OOTBService:
         if node.kind == NodeKind.LEVEL1:
             raw = self.odata.get(self.mapping.wr_item_type, node.id)
             summary = self._to_summary(raw, fallback_title=node.summary.title or "Item")
-            files = self._wr_files(node.id)
             return DetailsData(summary, files)
 
         if node.kind == NodeKind.LEVEL2:
             raw = self.odata.get(self.mapping.task_item_type, node.id)
             summary = self._to_summary(raw, fallback_title=node.summary.title or "Item")
-            return DetailsData(summary, None)
+            files = self._task_files(node.id)
+            return DetailsData(summary, files)
 
         return DetailsData({"id": node.id}, None)
 
@@ -301,7 +337,7 @@ class OOTBService:
                 summary=self._to_summary(r, fallback_title="Item"),
                 item_type=self.mapping.wr_item_type,
                 role="WR",
-                can_expand=None,
+                can_expand=True,
             )
             for r in rows
         ]
@@ -331,15 +367,12 @@ class OOTBService:
     ) -> List[FileNode]:
         """
         Recursively collect files/folders starting from a root item.
-
         Depth 0:
             root_item_type + root_relationship_name
             e.g. WR -> Ans_SimReq_Input
-
         Depth > 0:
             Ans_Data -> Ans_DataChild
         """
-
         def _recurse(parent_id: str, depth: int) -> List[FileNode]:
             flattened: List[FileNode] = []
 
@@ -353,28 +386,23 @@ class OOTBService:
                 expand=expand,
             )
 
-            for itm in items:
-                node = itm.get("related_id")
-
-                if not node:
-                    continue
-
-                is_folder = node.get("is_folder") == "1"
+            for item in items:
+                is_folder = item.get("is_folder") == "1"
 
                 flattened.append(
                     FileNode(
-                        id=str(node["id"]),
-                        name=str(node.get("keyed_name") or ""),
+                        id=str(item["id"]),
+                        name=str(item.get("keyed_name") or ""),
                         is_folder=is_folder,
-                        size=int(node.get("file_size") or 0),
+                        size=int(item.get("file_size") or 0),
                         depth=depth,
-                        file_id=node.get("local_file"),
-                        classification=node.get("classification"),
+                        vault_id=item.get("local_file@aras.id") if not is_folder else "None",
+                        classification=item.get("classification"),
                     )
                 )
 
                 if is_folder:
-                    flattened.extend(_recurse(str(node["id"]), depth + 1))
+                    flattened.extend(_recurse(str(item["id"]), depth + 1))
 
             return flattened
 
@@ -418,9 +446,15 @@ class OOTBService:
                 expand=expand,
             )
 
-        return results
+        return FileSet(results["inputs"], results["outputs"])
 
-    def download_file(self, file_id: str, local_dir: str) -> str:
-        """Internal helper used by server route"""
-        return self.cli.download(remote=f"ans_Data/{file_id}", local=local_dir)
+    def download_to_server_via_cli(self, ans_data_id: str, dest: str) -> str:
+        ret = self.cli.download(remote=f"ans_Data/{ans_data_id}", local=dest)
+        print(f"CLI download result: {ret}")
+        return dest
 
+    def download_to_server_via_odata(self, vault_id: str, dest: str) -> str:
+        print(f"Initiating OData download for vault_id={vault_id} to dest={dest}")
+        ret = self.odata.download(vault_id, dest)
+        print(f"OData download result: {ret}")
+        return dest
