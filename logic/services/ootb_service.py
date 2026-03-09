@@ -4,7 +4,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional, List, Sequence
 
-from datamodel.models import FilterSpec, OptionSpec, BadgeSpec, SummarySpec, BadgeBuilder, NodeKind, NodeRef, Summary, Badge, DetailsData, ChildrenResult, FileNode, FileSet
+from datamodel.models import (
+    FilterSpec,
+    OptionSpec,
+    BadgeSpec,
+    SummarySpec,
+    BadgeBuilder,
+    NodeKind,
+    NodeRef,
+    Summary,
+    Badge,
+    DetailsData,
+    ChildrenResult,
+    FileNode,
+    FileSet,
+    BadgeColor,
+    merge_badge_specs,
+)
 from logic.core.minerva.odata import MinervaODataClient
 from logic.core.minerva.cli import MinervaCLIClient
 
@@ -73,15 +89,14 @@ class OOTBDisplayPolicy:
         return sv
 
     def _spec_project(self) -> SummarySpec:
+        print("### _spec_project CALLED from:", __file__)
         return SummarySpec(
-            title_keys=("keyed_name", "name"),
-            subtitle_keys=("description", "item_number", "_model_name"),
+            title_keys=("item_number",),
+            subtitle_keys=("name",),
             fallback_title="Project",
             badges=(
-                BadgeSpec("State", "state", order=10),
-                BadgeSpec("Owner", "owned_by_id", order=30),
-                BadgeSpec("Modified", "modified_on", order=50, fmt=self._fmt_date_short),
-                BadgeSpec("Type", "_model_name", order=90),
+                BadgeSpec("Owner", "modified_by_id", order=30, show_label=False, color="light"),
+                BadgeSpec("Created", "created_on", order=50, fmt=self._fmt_date_short, show_label=True, color="light")
             ),
         )
 
@@ -91,13 +106,13 @@ class OOTBDisplayPolicy:
             subtitle_keys=("description", "_model_name"),
             fallback_title="Work Request",
             badges=(
-                BadgeSpec("State", "state", order=10),
-                BadgeSpec("Status", "status", order=20),
-                BadgeSpec("Owner", "owned_by_id", order=30),
-                BadgeSpec("Created", "created_on", order=40, fmt=self._fmt_date_short),
-                BadgeSpec("Modified", "modified_on", order=50, fmt=self._fmt_date_short),
-                BadgeSpec("Classification", "classification", order=60),
-                BadgeSpec("Type", "_model_name", order=90),
+                BadgeSpec("State", "state", order=10, show_label=False, color="warning"),
+                BadgeSpec("Status", "status", order=20, show_label=False, color="light"),
+                BadgeSpec("Owner", "owned_by_id", order=30, show_label=False, color="light"),
+                BadgeSpec("Created", "created_on", order=40, fmt=self._fmt_date_short, show_label=False, color="light"),
+                BadgeSpec("Modified", "modified_on", order=50, fmt=self._fmt_date_short, show_label=True, color="light"),
+                BadgeSpec("Classification", "classification", order=60, show_label=False, color="light"),
+                BadgeSpec("Type", "_model_name", order=90, show_label=False, color="light"),
             ),
         )
 
@@ -109,11 +124,9 @@ class OOTBDisplayPolicy:
             badges=(),
         )
 
-    def select_spec(self, row: dict) -> SummarySpec:
-        item_type = get_item_type(row)
-        builder = self._spec_by_item_type.get(item_type, self._spec_default)
-        return builder()
-
+    def select_spec(self, item_type: str) -> SummarySpec:
+        spec = self._spec_by_item_type.get(item_type, self._spec_default)
+        return spec()
 
 
 
@@ -162,12 +175,20 @@ class OOTBService:
 
     def list_level0(self, *, filters: Optional[dict[str, Any]] = None) -> List[NodeRef]:
         """Return Project nodes"""
-        rows = self.odata.list(self.mapping.project_item_type)
+        select_fields = ["id",
+                         "item_number",
+                         "keyed_name",
+                         "name",
+                         "created_on",
+                         "modified_on",
+                         ]
+        rows = self.odata.list(self.mapping.project_item_type, select=select_fields)
+        print(f"list_level0: fetched {len(rows)} {self.mapping.project_item_type}")
         return [
             NodeRef(
                 id=str(r["id"]),
                 kind=NodeKind.LEVEL0,  # Project
-                summary=self._to_summary(r),
+                summary=self._to_summary(r, item_type=self.mapping.project_item_type),
                 item_type=self.mapping.project_item_type,
                 role="Project",
                 can_expand=True,
@@ -187,63 +208,30 @@ class OOTBService:
         """Return summary and optional files"""
         if node.kind == NodeKind.LEVEL0:
             raw = self.odata.get(self.mapping.project_item_type, node.id)
-            summary = self._to_summary(raw)
+            summary = self._to_summary(raw, item_type=self.mapping.project_item_type)
             return DetailsData(summary, None)
 
         if node.kind == NodeKind.LEVEL1:
             raw = self.odata.get(self.mapping.wr_item_type, node.id)
-            summary = self._to_summary(raw)
+            summary = self._to_summary(raw, item_type=self.mapping.wr_item_type)
             return DetailsData(summary, files)
 
         if node.kind == NodeKind.LEVEL2:
             raw = self.odata.get(self.mapping.task_item_type, node.id)
-            summary = self._to_summary(raw)
+            summary = self._to_summary(raw, item_type=self.mapping.task_item_type)
             files = self._task_files(node.id)
             return DetailsData(summary, files)
 
         return DetailsData({"id": node.id}, None)
 
     # ---------------- Internals ----------------
-
-    # def _s(self, v: Any) -> Optional[str]:
-    #     """Convert to a displayable string; return None for empty values."""
-    #     if v is None:
-    #         return None
-    #     if isinstance(v, str):
-    #         vv = v.strip()
-    #         return vv or None
-    #     return str(v)
-
-    # def _badge(self, label: str, value: Any) -> Optional[Badge]:
-    #     sv = self._s(value)
-    #     if sv is None:
-    #         return None
-    #     return Badge(label=label, value=sv)
-
-    # def _badges_by_specs(self, row: dict, specs: Sequence[BadgeSpec]) -> List[Badge]:
-    #     out: List[Badge] = []
-
-    #     for s in sorted(specs, key=lambda x: x.order):
-    #         if s.when and not s.when(row):
-    #             continue
-
-    #         value = row.get(s.key)
-    #         if s.fmt:
-    #             value = s.fmt(value, row)
-
-    #         b = self._badge(s.label, value)
-    #         if b:
-    #             out.append(b)
-
-    #     return out
-
-    def _to_summary(self, row: dict) -> Summary:
+    def _to_summary(self, row: dict, *, item_type: str) -> Summary:
         """Build a UI Summary using the display policy (spec-based).
 
         This keeps the service tenant-agnostic while allowing per-item-type
         customization via SummarySpec / BadgeSpec.
         """
-        spec = self.display_policy.select_spec(row)
+        spec = self.display_policy.select_spec(item_type)
 
         def _pick_first(row: dict, keys: Sequence[str]) -> Optional[str]:
             for k in keys:
@@ -270,7 +258,7 @@ class OOTBService:
             NodeRef(
                 id=str(r["id"]),
                 kind=NodeKind.LEVEL1,
-                summary=self._to_summary(r),
+                summary=self._to_summary(r, item_type=self.mapping.wr_item_type),
                 item_type=self.mapping.wr_item_type,
                 role="WR",
                 can_expand=True,
@@ -284,7 +272,7 @@ class OOTBService:
             NodeRef(
                 id=str(r["id"]),
                 kind=NodeKind.LEVEL2,
-                summary=self._to_summary(r),
+                summary=self._to_summary(r, item_type=self.mapping.task_item_type),
                 item_type=self.mapping.task_item_type,
                 role="Task",
                 can_expand=None,

@@ -209,6 +209,7 @@ class MinervaODataClient:
             timeout=self.timeout,
             verify=self.verify,
         )
+        logging.debug(f"Response: response.text={response.text}")
 
         if response.status_code == 401 and retry_401:
             if self.auth.authenticate():

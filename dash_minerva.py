@@ -51,18 +51,6 @@ def get_viewer_type_by_ext(file_name: str | None):
             return viewer_type
     return None
 
-
-def get_status_color(status):
-    s = str(status).lower() if status else ""
-    if any(x in s for x in ["active", "open", "success", "running"]): return "light"
-    if any(x in s for x in ["close", "closed", "complete"]): return "dark"
-    if any(x in s for x in ["new"]): return "warning"
-    if any(x in s for x in ["progress", "queued", "in work"]): return "success"
-    if any(x in s for x in ["accepted", "in review"]): return "info"
-    if any(x in s for x in ["paused", "failed", "error"]): return "danger"
-    return "secondary"
-
-
 def render_placeholder(text, height="150px"):
     return html.Div(
         [html.Div(text, className="text-muted small fw-light px-4 text-center")],
@@ -85,6 +73,16 @@ def node_to_dict(n: NodeRef) -> dict:
         "id": n.id,
         "kind": n.kind.value if hasattr(n.kind, "value") else str(n.kind),
         "title": n.summary.title,
+        "subtitle": n.summary.subtitle,
+        "badges": [
+            {
+                "label": b.label,
+                "value": b.value,
+                "show_label": b.show_label,
+                "color": b.color,
+            }
+            for b in (n.summary.badges or [])
+        ],
         "item_type": n.item_type,
         "role": n.role,
         "can_expand": n.can_expand,
@@ -94,7 +92,19 @@ def node_from_dict(d: dict) -> NodeRef:
     return NodeRef(
         id=d["id"],
         kind=NodeKind(d["kind"]),
-        summary=Summary(title=d.get("title", d["id"]), subtitle=d.get("subtitle"), badges=d.get("badges", [])),
+        summary=Summary(
+            title=d.get("title", d["id"]),
+            subtitle=d.get("subtitle"),
+            badges=[
+                Badge(
+                    label=b["label"],
+                    value=b["value"],
+                    show_label=b.get("show_label", True),
+                    color=b.get("color", "light"),
+                )
+                for b in d.get("badges", [])
+            ],
+        ),
         item_type=d.get("item_type", ""),
         role=d.get("role", ""),
         can_expand=d.get("can_expand", None),
@@ -134,15 +144,36 @@ def resolve_default_value(spec: FilterFieldSpec) -> Any:
 def _summary_badges_to_ui(badges: list[Badge]) -> list:
     out = []
     for b in badges or []:
+        text = b.value if not b.show_label else f"{b.label}: {b.value}"
+        text_color = "dark" if b.color == "light" else "white"
+
         out.append(
             dbc.Badge(
-                f"{b.label}: {b.value}",
-                color="light",
-                text_color="dark",
-                className="me-2 border",
+                text,
+                color=b.color,
+                text_color=text_color,
+                className="border",
             )
         )
+
     return out
+
+def render_badges(
+    badges: list[Badge],
+    *,
+    className: str = "",
+    gap_class: str = "gap-1",
+):
+    if not badges:
+        return None
+
+    return html.Div(
+        _summary_badges_to_ui(badges),
+        className=f"d-flex flex-wrap align-items-center {gap_class} {className}".strip(),
+        style={
+            "rowGap": "6px",
+        },
+    )
 
 def render_header_from_details(details: DetailsData):
     s = details.summary
@@ -458,24 +489,18 @@ def render_filters(_):
     filter_spec = service.get_filter_spec() or {}
     return build_filter_components(filter_spec)
 
-def render_level0_item(node: NodeRef, details: DetailsData | None = None):
+def render_level0_item(node: NodeRef, details: DetailsData | None = None, active: bool = False):
     title = node.summary.title
+    subtitle = node.summary.subtitle
     state_text = node.role or "LEVEL0"
 
-    badge_components = []
+    badges = []
+    if node.summary and node.summary.badges:
+        badges = node.summary.badges
+    elif details and details.summary and details.summary.badges:
+        badges = details.summary.badges
 
-    if details and details.summary and details.summary.badges:
-        for b in details.summary.badges:
-            value = b.value or ""
-            label = str(b.label).lower()
-
-            color = "light"
-            if label == "state":
-                color = get_status_color(value)
-
-            badge_components.append(
-                dbc.Badge(value, color=color, pill=True)
-            )
+    badge_block = render_badges(badges, className="mt-2")
 
     return dbc.ListGroupItem(
         [
@@ -483,18 +508,21 @@ def render_level0_item(node: NodeRef, details: DetailsData | None = None):
                 [
                     html.Div(
                         [
-                            html.Div(title, className="fw-bold text-dark", style={"fontSize": "14px"}),
-                            html.Div(node.summary.subtitle, className="text-muted", style={"fontSize": "11px", "marginTop": "2px"}),
+                            html.Div(title, className="level0-title", style={"fontSize": "14px"}),
+                            html.Div(subtitle or "",
+                                      className="level0-subtitle",
+                                      style={"fontSize": "11px", "marginTop": "2px"}),
+                            badge_block,
                         ],
                         style={"flex": "1", "minWidth": "0"},
                     ),
-                    *badge_components,  # Bage list
                 ],
                 className="d-flex justify-content-between align-items-center",
             )
         ],
         id={"type": "level0-item", "index": node.id},
         action=True,
+        active=active,
         className="border-0 border-bottom py-3",
     )
 
@@ -504,19 +532,39 @@ def render_level0_item(node: NodeRef, details: DetailsData | None = None):
     Output("store-node-by-id", "data"),
     Input({"type": "dynamic-filter", "name": ALL}, "value"),
     State({"type": "dynamic-filter", "name": ALL}, "id"),
+    State("store-selected", "data"),
     prevent_initial_call=False,
 )
-def update_level0_list(filter_values, filter_ids):
+def update_level0_list(filter_values, filter_ids, selected):
     filters = build_filters(filter_values, filter_ids)
 
     level0_nodes = service.list_level0(filters=filters)
+    print(f"update_level0_list [0] item_type = {level0_nodes[0].item_type}")
 
     if not level0_nodes:
         return html.Div("No items found.", className="text-muted p-3 small text-center"), {}
 
+    selected_level0 = (selected or {}).get("level0")
+
     node_map = build_node_map(level0_nodes)
-    items = [render_level0_item(n, details=None) for n in level0_nodes]
-    return dbc.ListGroup(items, flush=True), node_map
+    items = [
+        render_level0_item(n, details=None, active=(n.id == selected_level0))
+        for n in level0_nodes
+    ]
+    return dbc.ListGroup(items, flush=True, className="level0-list"), node_map
+
+@callback(
+    Output({"type": "level0-item", "index": ALL}, "active"),
+    Input("store-selected", "data"),
+    State({"type": "level0-item", "index": ALL}, "id"),
+    prevent_initial_call=False,
+)
+def highlight_selected_level0(selected, item_ids):
+    selected_level0 = (selected or {}).get("level0")
+    return [
+        item_id["index"] == selected_level0
+        for item_id in (item_ids or [])
+    ]
 
 
 def render_level1_section(level1_nodes: list[NodeRef]):
@@ -647,7 +695,6 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
 
     # Dynamic title based on children role (NO tenant branching)
     level2_title = infer_children_role_title(level2_nodes, "Level 2 + Files")
-    # If level2 are Tasks, "Files" may not apply; this stays acceptable. If you want, we can refine to "Level 2" only.
 
     if not level2_nodes:
         new_selected = dict(selected or {})

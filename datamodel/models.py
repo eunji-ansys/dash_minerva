@@ -1,9 +1,11 @@
 # datamodel/models.py
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Sequence, TypeAlias, TypedDict, List, Optional
+from typing import Any, Callable, Sequence, TypeAlias, TypedDict, List, Optional, Literal
+
 
 class OptionSpec(TypedDict):
     label: str
@@ -15,15 +17,36 @@ class FilterFieldSpec(TypedDict, total=False):
     enabled: bool
     options: List[OptionSpec]
     default: Any
-    placeholder: str  # optional UI hint
+    placeholder: str
     multi: bool
-    component: str   # "dropdown", "input", "radio" etc. (optional UI hint)
+    component: str
 
 
 FilterSpec: TypeAlias = dict[str, FilterFieldSpec]
 Filters: TypeAlias = dict[str, Any]
 
 TextFormatter = Callable[[Any, dict], Any]
+
+BadgeColor = Literal[
+    "primary",
+    "secondary",
+    "success",
+    "danger",
+    "warning",
+    "info",
+    "light",
+    "dark",
+]
+
+def status_color(status):
+    s = str(status).lower() if status else ""
+    if any(x in s for x in ["active", "open", "success", "running"]): return "light"
+    if any(x in s for x in ["close", "closed", "complete"]): return "dark"
+    if any(x in s for x in ["new"]): return "warning"
+    if any(x in s for x in ["progress", "queued", "in work"]): return "success"
+    if any(x in s for x in ["accepted", "in review"]): return "info"
+    if any(x in s for x in ["paused", "failed", "error"]): return "danger"
+    return "secondary"
 
 @dataclass(frozen=True)
 class BadgeSpec:
@@ -32,6 +55,9 @@ class BadgeSpec:
     order: int = 100
     fmt: Optional[TextFormatter] = None
     when: Optional[Callable[[dict], bool]] = None
+    show_label: bool = True
+    color: Optional[BadgeColor] = None
+    color_fn: Optional[Callable[[Any], BadgeColor]] = None
 
 
 @dataclass(frozen=True)
@@ -44,9 +70,37 @@ class SummarySpec:
     badges: Sequence[BadgeSpec] = ()
 
 
-# ----------------------------
-# BadgeBuilder (implementation unit)
-# ----------------------------
+def merge_badge_specs(
+    base: Sequence[BadgeSpec],
+    override: Sequence[BadgeSpec],
+) -> tuple[BadgeSpec, ...]:
+    """
+    Merge badge specs by key.
+
+    Rules:
+    - base badges are the default
+    - override badges replace base badges with the same key
+    - new override badges are appended
+    - final result is sorted by order
+    """
+    merged: "OrderedDict[str, BadgeSpec]" = OrderedDict()
+
+    for spec in base:
+        merged[spec.key] = spec
+
+    for spec in override:
+        merged[spec.key] = spec
+
+    return tuple(sorted(merged.values(), key=lambda x: x.order))
+
+
+@dataclass(frozen=True)
+class Badge:
+    label: str
+    value: str
+    show_label: bool = True
+    color: BadgeColor = "light"
+
 
 class BadgeBuilder:
     def _s(self, v: Any) -> Optional[str]:
@@ -57,39 +111,51 @@ class BadgeBuilder:
             return vv or None
         return str(v)
 
-    def _badge(self, label: str, value: Any) -> Optional["Badge"]:
-        sv = self._s(value)
-        if sv is None:
-            return None
-        return Badge(label=label, value=sv)
+    def _resolve_color(self, *, raw_value: Any, spec: BadgeSpec) -> BadgeColor:
+        if spec.color_fn:
+            try:
+                return spec.color_fn(raw_value)
+            except Exception:
+                pass
+
+        if spec.color:
+            return spec.color
+
+        return "light"
 
     def build(self, row: dict, specs: Sequence[BadgeSpec]) -> List["Badge"]:
         out: List["Badge"] = []
+
         for s in sorted(specs, key=lambda x: x.order):
             if s.when and not s.when(row):
                 continue
+
             raw = row.get(s.key)
             if s.fmt:
                 raw = s.fmt(raw, row)
-            b = self._badge(s.label, raw)
-            if b:
-                out.append(b)
+
+            value = self._s(raw)
+            if value is None:
+                continue
+
+            out.append(
+                Badge(
+                    label=s.label,
+                    value=value,
+                    show_label=s.show_label,
+                    color=self._resolve_color(raw_value=raw, spec=s),
+                )
+            )
+
         return out
 
 
 class NodeKind(str, Enum):
-    """
-    UI hierarchy levels (tenant/schema independent).
-    """
     LEVEL0 = "level0"
     LEVEL1 = "level1"
     LEVEL2 = "level2"
 
     def next(self) -> Optional["NodeKind"]:
-        """
-        Return the next UI level.
-        LEVEL0 -> LEVEL1 -> LEVEL2 -> None (leaf)
-        """
         if self == NodeKind.LEVEL0:
             return NodeKind.LEVEL1
         if self == NodeKind.LEVEL1:
@@ -102,30 +168,12 @@ class NodeKind(str, Enum):
 
 @dataclass(frozen=True)
 class NodeRef:
-    """
-    Lightweight handle pointing to a node location.
-    Does NOT contain actual server data.
-
-    - item_type: schema type hint (e.g., ans_Project, VD_SimulationRequest, Ans_SimulationRequest)
-                UI must NOT branch on this.
-    - role: business/UI label (e.g., Project, SR, WR, Task)
-    - can_expand: service hint for tree UI.
-        * True  => show expand UI, allow get_children() call
-        * False => leaf, do not call get_children()
-        * None  => unknown (fallback to kind-based logic if needed)
-    """
     id: str
     kind: NodeKind
     summary: Summary
     item_type: str
     role: str
     can_expand: Optional[bool] = None
-
-
-@dataclass(frozen=True)
-class Badge:
-    label: str
-    value: str
 
 
 @dataclass(frozen=True)
