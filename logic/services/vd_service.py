@@ -2,10 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Any, Optional, List
 
 from logic.services.ootb_service import OOTBDisplayPolicy, OOTBService, BadgeSpec, SummarySpec, TenantMapping, FilterSpec, get_item_type, normalize_options
-from datamodel.models import NodeKind, NodeRef, Summary, DetailsData, ChildrenResult
+from datamodel.models import BadgeBuilder, NodeKind, NodeRef, Summary, DetailsData, ChildrenResult
 
 import logging
 from ..utils.decorators import log
@@ -76,6 +76,7 @@ class VDService(OOTBService):
 
         # Patch display policy to include VD-only item types
         self.display_policy = VDDisplayPolicy(OOTBDisplayPolicy(self.mapping), self.mapping)
+        self.badge_builder = BadgeBuilder()
 
     def get_filter_spec(self) -> FilterSpec:
         year_opts = normalize_options(self.get_filter_years())
@@ -103,14 +104,18 @@ class VDService(OOTBService):
             },
         }
 
-    def list_level0(self, *, year: Optional[int] = None, product: Optional[str] = None) -> List[NodeRef]:
+    def list_level0(self, *, filters: Optional[dict[str, Any]] = None) -> List[NodeRef]:
         """Return Project nodes"""
-        filters = []
+        filters = filters or {}
+        year = filters.get("year")
+        product = filters.get("product")
+        filter_clauses = []
+
         if year is not None and str(year).strip() != "":
-            filters.append(f"_development_year eq '{year}'")
+            filter_clauses.append(f"_development_year eq '{year}'")
         if product is not None and str(product).strip() != "":
-            filters.append(f"_product_category eq '{product}'")
-        filter = " and ".join(filters) if filters else None
+            filter_clauses.append(f"_product_category eq '{product}'")
+        filter = " and ".join(filter_clauses) if filter_clauses else None
 
         select_fields = ["id", "item_number", "name", "_model_name", "state"]
 
@@ -119,7 +124,7 @@ class VDService(OOTBService):
             NodeRef(
                 id=str(r["id"]),
                 kind=NodeKind.LEVEL0,
-                summary=self._to_summary(r, fallback_title="Item"),
+                summary=self._to_summary(r),
                 item_type=self.mapping.project_item_type,
                 role="Project",
                 can_expand=None,
@@ -139,12 +144,12 @@ class VDService(OOTBService):
         """WR holds files in VD"""
         if node.kind == NodeKind.LEVEL1:
             raw = self.odata.get(self.mapping.sr_item_type, node.id)
-            summary = self._to_summary(raw, fallback_title=node.summary.title or "Item")
+            summary = self._to_summary(raw)
             return DetailsData(summary, None)
 
         if node.kind == NodeKind.LEVEL2:
             raw = self.odata.get(self.mapping.wr_item_type, node.id)
-            summary = self._to_summary(raw, fallback_title=node.summary.title or "Item")
+            summary = self._to_summary(raw)
             files = self._wr_files(node.id)
             return DetailsData(summary, files)
 
@@ -166,7 +171,7 @@ class VDService(OOTBService):
             NodeRef(
                 id=str(r["id"]),
                 kind=NodeKind.LEVEL1,
-                summary=self._to_summary(r, fallback_title="Item"),
+                summary=self._to_summary(r),
                 item_type=self.mapping.sr_item_type,
                 role="SR",
                 can_expand=None,
@@ -180,7 +185,7 @@ class VDService(OOTBService):
             NodeRef(
                 id=str(r["id"]),
                 kind=NodeKind.LEVEL2,
-                summary=self._to_summary(r, fallback_title="Item"),
+                summary=self._to_summary(r),
                 item_type=self.mapping.wr_item_type,
                 role="WR",
                 can_expand=None,
@@ -209,7 +214,7 @@ class VDService(OOTBService):
     #             NodeRef(
     #                 id=str(wr_id),
     #                 kind=NodeKind.LEVEL2,
-    #                 summary=self._to_summary(rel, fallback_title="Item"),
+    #                 summary=self._to_summary(rel),
     #                 item_type=self.mapping.wr_item_type,
     #                 role="WR",
     #                 can_expand=None,

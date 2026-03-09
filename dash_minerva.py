@@ -15,7 +15,7 @@ from urllib.parse import quote
 from flask import logging, request, send_file, abort
 
 from logic.services.service_factory import get_service
-from datamodel.models import NodeRef, NodeKind, DetailsData, FileNode, FileSet, Summary, Badge
+from datamodel.models import FilterFieldSpec, Filters, FilterSpec, NodeRef, NodeKind, DetailsData, FileNode, FileSet, Summary, Badge
 
 print("### RUNNING DASH FILE:", __file__)
 
@@ -29,27 +29,6 @@ service = get_service()
 print("### Service initialized:", service)
 
 # --- [2. Helper Functions] ---
-
-
-class OptionSpec(TypedDict):
-    label: str
-    value: Any
-
-
-class FilterFieldSpec(TypedDict, total=False):
-    label: str
-    enabled: bool
-    options: List[OptionSpec]
-    default: Any
-    placeholder: str  # optional UI hint
-    multi: bool
-    component: str   # "dropdown", "input", "radio" etc. (optional UI hint)
-
-
-FilterSpec: TypeAlias = dict[str, FilterFieldSpec]
-Filters: TypeAlias = dict[str, Any]
-
-
 FIXED_VIEWER_CONFIG = {
     ".pdf": "PDF_VIEWER",
     ".txt": "TEXT_VIEWER",
@@ -530,16 +509,7 @@ def render_level0_item(node: NodeRef, details: DetailsData | None = None):
 def update_level0_list(filter_values, filter_ids):
     filters = build_filters(filter_values, filter_ids)
 
-    try:
-        level0_nodes = service.list_level0(filters=filters)
-    except TypeError:
-        try:
-            level0_nodes = service.list_level0(
-                year=filters.get("year"),
-                product=filters.get("product"),
-            )
-        except TypeError:
-            level0_nodes = service.list_level0()
+    level0_nodes = service.list_level0(filters=filters)
 
     if not level0_nodes:
         return html.Div("No items found.", className="text-muted p-3 small text-center"), {}

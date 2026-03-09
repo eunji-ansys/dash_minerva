@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Iterable, List, Protocol, Sequence, Dict, TypeAlias, TypedDict
+from typing import Any, Optional, List, Sequence
 
-from datamodel.models import FileSet, NodeKind, NodeRef, Summary, Badge, DetailsData, ChildrenResult, FileNode
+from datamodel.models import FilterSpec, OptionSpec, BadgeSpec, SummarySpec, BadgeBuilder, NodeKind, NodeRef, Summary, Badge, DetailsData, ChildrenResult, FileNode, FileSet
 from logic.core.minerva.odata import MinervaODataClient
 from logic.core.minerva.cli import MinervaCLIClient
 
@@ -31,21 +31,6 @@ class TenantMapping:
     rel_data_to_child_data: str = "Ans_DataChild"
 
 
-class OptionSpec(TypedDict):
-    label: str
-    value: Any
-
-class FilterFieldSpec(TypedDict, total=False):
-    label: str
-    enabled: bool
-    options: List[OptionSpec]
-    default: Any
-    placeholder: str  # optional UI hint
-    multi: bool
-    component: str   # "dropdown", "input", "radio" etc. (optional UI hint)
-
-FilterSpec: TypeAlias = dict[str, FilterFieldSpec]
-
 def normalize_options(raw: Any) -> List[OptionSpec]:
         """
         Normalize into Dash dropdown options: [{"label": ..., "value": ...}, ...]
@@ -61,59 +46,6 @@ def normalize_options(raw: Any) -> List[OptionSpec]:
                 out.append({"label": str(x), "value": x})
             return out
         return []
-
-TextFormatter = Callable[[Any, dict], Any]
-
-@dataclass(frozen=True)
-class BadgeSpec:
-    label: str
-    key: str
-    order: int = 100
-    fmt: Optional[TextFormatter] = None
-    when: Optional[Callable[[dict], bool]] = None
-
-
-@dataclass(frozen=True)
-class SummarySpec:
-    title_keys: Sequence[str]
-    subtitle_keys: Sequence[str]
-    fallback_title: str = "Item"
-    title_fmt: Optional[TextFormatter] = None
-    subtitle_fmt: Optional[TextFormatter] = None
-    badges: Sequence[BadgeSpec] = ()
-
-
-# ----------------------------
-# BadgeBuilder (implementation unit)
-# ----------------------------
-
-class BadgeBuilder:
-    def _s(self, v: Any) -> Optional[str]:
-        if v is None:
-            return None
-        if isinstance(v, str):
-            vv = v.strip()
-            return vv or None
-        return str(v)
-
-    def _badge(self, label: str, value: Any) -> Optional["Badge"]:
-        sv = self._s(value)
-        if sv is None:
-            return None
-        return Badge(label=label, value=sv)
-
-    def build(self, row: dict, specs: Sequence[BadgeSpec]) -> List["Badge"]:
-        out: List["Badge"] = []
-        for s in sorted(specs, key=lambda x: x.order):
-            if s.when and not s.when(row):
-                continue
-            raw = row.get(s.key)
-            if s.fmt:
-                raw = s.fmt(raw, row)
-            b = self._badge(s.label, raw)
-            if b:
-                out.append(b)
-        return out
 
 
 def get_item_type(row: dict) -> str:
@@ -220,6 +152,7 @@ class OOTBService:
 
         # Display policy (summary/badges)
         self.display_policy = OOTBDisplayPolicy(self.mapping)
+        self.badge_builder = BadgeBuilder()
 
     def get_filter_spec(self) -> FilterSpec:
         # Default: filters are not supported
@@ -234,7 +167,7 @@ class OOTBService:
             NodeRef(
                 id=str(r["id"]),
                 kind=NodeKind.LEVEL0,  # Project
-                summary=self._to_summary(r, fallback_title="Item"),
+                summary=self._to_summary(r),
                 item_type=self.mapping.project_item_type,
                 role="Project",
                 can_expand=True,
@@ -254,17 +187,17 @@ class OOTBService:
         """Return summary and optional files"""
         if node.kind == NodeKind.LEVEL0:
             raw = self.odata.get(self.mapping.project_item_type, node.id)
-            summary = self._to_summary(raw, fallback_title=node.summary.title or "Item")
+            summary = self._to_summary(raw)
             return DetailsData(summary, None)
 
         if node.kind == NodeKind.LEVEL1:
             raw = self.odata.get(self.mapping.wr_item_type, node.id)
-            summary = self._to_summary(raw, fallback_title=node.summary.title or "Item")
+            summary = self._to_summary(raw)
             return DetailsData(summary, files)
 
         if node.kind == NodeKind.LEVEL2:
             raw = self.odata.get(self.mapping.task_item_type, node.id)
-            summary = self._to_summary(raw, fallback_title=node.summary.title or "Item")
+            summary = self._to_summary(raw)
             files = self._task_files(node.id)
             return DetailsData(summary, files)
 
@@ -272,39 +205,39 @@ class OOTBService:
 
     # ---------------- Internals ----------------
 
-    def _s(self, v: Any) -> Optional[str]:
-        """Convert to a displayable string; return None for empty values."""
-        if v is None:
-            return None
-        if isinstance(v, str):
-            vv = v.strip()
-            return vv or None
-        return str(v)
+    # def _s(self, v: Any) -> Optional[str]:
+    #     """Convert to a displayable string; return None for empty values."""
+    #     if v is None:
+    #         return None
+    #     if isinstance(v, str):
+    #         vv = v.strip()
+    #         return vv or None
+    #     return str(v)
 
-    def _badge(self, label: str, value: Any) -> Optional[Badge]:
-        sv = self._s(value)
-        if sv is None:
-            return None
-        return Badge(label=label, value=sv)
+    # def _badge(self, label: str, value: Any) -> Optional[Badge]:
+    #     sv = self._s(value)
+    #     if sv is None:
+    #         return None
+    #     return Badge(label=label, value=sv)
 
-    def _badges_by_specs(self, row: dict, specs: Sequence[BadgeSpec]) -> List[Badge]:
-        out: List[Badge] = []
+    # def _badges_by_specs(self, row: dict, specs: Sequence[BadgeSpec]) -> List[Badge]:
+    #     out: List[Badge] = []
 
-        for s in sorted(specs, key=lambda x: x.order):
-            if s.when and not s.when(row):
-                continue
+    #     for s in sorted(specs, key=lambda x: x.order):
+    #         if s.when and not s.when(row):
+    #             continue
 
-            value = row.get(s.key)
-            if s.fmt:
-                value = s.fmt(value, row)
+    #         value = row.get(s.key)
+    #         if s.fmt:
+    #             value = s.fmt(value, row)
 
-            b = self._badge(s.label, value)
-            if b:
-                out.append(b)
+    #         b = self._badge(s.label, value)
+    #         if b:
+    #             out.append(b)
 
-        return out
+    #     return out
 
-    def _to_summary(self, row: dict, *, fallback_title: str = "Item") -> Summary:
+    def _to_summary(self, row: dict) -> Summary:
         """Build a UI Summary using the display policy (spec-based).
 
         This keeps the service tenant-agnostic while allowing per-item-type
@@ -312,19 +245,22 @@ class OOTBService:
         """
         spec = self.display_policy.select_spec(row)
 
-        def _pick(keys, *, fmt: Optional[Callable[[Any, dict], Any]] = None) -> Optional[str]:
+        def _pick_first(row: dict, keys: Sequence[str]) -> Optional[str]:
             for k in keys:
                 v = row.get(k)
-                if fmt:
-                    v = fmt(v, row)
-                sv = self._s(v)
-                if sv is not None:
-                    return sv
+                if v is None:
+                    continue
+                if isinstance(v, str):
+                    v = v.strip()
+                    if not v:
+                        continue
+                    return v
+                return str(v)
             return None
 
-        title = _pick(spec.title_keys, fmt=spec.title_fmt) or (fallback_title or spec.fallback_title)
-        subtitle = _pick(spec.subtitle_keys, fmt=spec.subtitle_fmt)
-        badges = self._badges_by_specs(row, spec.badges)
+        title = _pick_first(row, spec.title_keys) or spec.fallback_title
+        subtitle = _pick_first(row, spec.subtitle_keys)
+        badges = self.badge_builder.build(row, spec.badges)
 
         return Summary(title=title, subtitle=subtitle, badges=badges)
 
@@ -334,7 +270,7 @@ class OOTBService:
             NodeRef(
                 id=str(r["id"]),
                 kind=NodeKind.LEVEL1,
-                summary=self._to_summary(r, fallback_title="Item"),
+                summary=self._to_summary(r),
                 item_type=self.mapping.wr_item_type,
                 role="WR",
                 can_expand=True,
@@ -348,7 +284,7 @@ class OOTBService:
             NodeRef(
                 id=str(r["id"]),
                 kind=NodeKind.LEVEL2,
-                summary=self._to_summary(r, fallback_title="Item"),
+                summary=self._to_summary(r),
                 item_type=self.mapping.task_item_type,
                 role="Task",
                 can_expand=None,
