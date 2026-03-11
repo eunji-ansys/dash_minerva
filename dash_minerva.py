@@ -205,14 +205,6 @@ def render_id_row(
 
     return html.Div(
         [
-            # html.Span(
-            #     f"{label}",
-            #     className="text-muted",
-            #     style={
-            #         "fontSize": "11px",
-            #         "lineHeight": "1.2",
-            #     },
-            # ),
             html.Code(
                 item_id,
                 style={
@@ -288,15 +280,15 @@ def render_header_from_details(details: DetailsData, item_id: str | None = None)
                 details.summary,
                 title_class="fw-bold mb-0",
                 title_style={
-                    "fontSize": "1.75rem",
-                    "lineHeight": "1.2",
+                    "fontSize": "1.5rem",
+                    "lineHeight": "1.15",
                 },
-                subtitle_class="text-muted",
+                subtitle_class="text-muted mb-0",
                 subtitle_style={
-                    "fontSize": "1rem",
-                    "marginTop": "4px",
+                    "fontSize": "0.95rem",
+                    "marginTop": "2px",
                 },
-                badges_class="mt-3",
+                badges_class="mt-2",
                 container_class="w-100",
                 badge_view="header",
                 copy_id=item_id,

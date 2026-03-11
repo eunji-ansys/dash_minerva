@@ -265,7 +265,7 @@ class VDService(OOTBService):
         ]
 
     def _children_sr_to_wr(self, node_id: str) -> List[NodeRef]:
-        expand = "related_id" #($select=id,item_number,name,keyed_name,current_state,created_on,modified_on,_simulation_type)
+        expand = "related_id"
         rows = self.odata.list_related(self.mapping.sr_item_type, node_id, self.mapping.rel_sr_to_wr, expand=expand)
         return [
             NodeRef(
