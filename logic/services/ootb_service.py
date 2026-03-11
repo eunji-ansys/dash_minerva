@@ -73,7 +73,7 @@ class OOTBDisplayPolicy:
             fallback_title="Project",
             badges=(
                 BadgeSpec("Owner", "modified_by_id", order=30, show_label=False, color="light", views=("header",)),
-                BadgeSpec("Created", "created_on", order=50, fmt=self._fmt_date_short, show_label=True, color="light", views=("header",))
+                BadgeSpec("Created", "created_on", order=50, fmt=self._fmt_date_short, show_label=True, color="light", views=("sidebar",))
             ),
         )
 
@@ -83,9 +83,9 @@ class OOTBDisplayPolicy:
             subtitle_keys=("item_number",),
             fallback_title="Work Request",
             badges=(
-                BadgeSpec("State", "current_state", order=10, show_label=False, color="warning", color_fn=status_color, views=("header",)),
-                BadgeSpec("Created", "created_on", order=40, fmt=self._fmt_date_short, show_label=True, color="light", views=("header",)),
-                BadgeSpec("Modified", "modified_on", order=50, fmt=self._fmt_date_short, show_label=True, color="light", views=("header",)),
+                BadgeSpec("State", "state", order=10, show_label=False, color="warning", color_fn=status_color, views=("card",)),
+                BadgeSpec("Created", "created_on", order=40, fmt=self._fmt_date_short, show_label=True, color="light", views=("card",)),
+                BadgeSpec("Modified", "modified_on", order=50, fmt=self._fmt_date_short, show_label=True, color="light", views=("card",)),
             ),
         )
 
@@ -95,10 +95,10 @@ class OOTBDisplayPolicy:
             subtitle_keys=("item_number",),
             fallback_title="Task",
             badges=(
-                BadgeSpec("State", "current_state", order=10, show_label=False, color="warning", color_fn=status_color, views=("header",)),
+                BadgeSpec("State", "state", order=10, show_label=False, color="warning", color_fn=status_color, views=("header",)),
                 BadgeSpec("Created", "created_on", order=40, fmt=self._fmt_date_short, show_label=True, color="light", views=("header",)),
                 BadgeSpec("Started", "date_start_actual", order=50, fmt=self._fmt_date_short, show_label=True, color="light", views=("header",)),
-                BadgeSpec("Assignees", "assignees", order=60, show_label=False, color="light", views=("header",)),
+                BadgeSpec("Assignees", "assignees", order=60, show_label=False, color="secondary", views=("header",)),
             ),
         )
 
@@ -201,8 +201,9 @@ class OOTBService:
         return out
 
     def _children_project_to_wr(self, node_id: str) -> List[NodeRef]:
-        expand = "related_id($select=id,item_number,name,current_state,created_on,modified_on)"
+        expand = "related_id" #($select=id,item_number,name,current_state,created_on,modified_on)
         rows = self.odata.list_related(self.mapping.project_item_type, node_id, self.mapping.rel_project_to_wr, expand=expand)
+
         out = [
             NodeRef(
                 id=str(r["id"]),
@@ -217,8 +218,9 @@ class OOTBService:
         return out
 
     def _children_wr_to_task(self, node_id: str) -> List[NodeRef]:
-        expand = "related_id($select=id,item_number,name,current_state,created_on,date_start_actual,assignees)"
+        expand = "related_id" #($select=id,item_number,name,current_state,created_on,date_start_actual,assignees)
         rows = self.odata.list_related(self.mapping.wr_item_type, node_id, self.mapping.rel_wr_to_task, expand=expand)
+
         out = [
             NodeRef(
                 id=str(r["id"]),
@@ -333,6 +335,7 @@ class OOTBService:
                         name=str(item.get("keyed_name") or ""),
                         is_folder=is_folder,
                         size=int(item.get("file_size") or 0),
+                        modified_on=item.get("modified_on"),
                         depth=depth,
                         vault_id=item.get("local_file@aras.id") if not is_folder else "None",
                         classification=item.get("classification"),
@@ -349,7 +352,7 @@ class OOTBService:
     def _wr_files(self, wr_id: str):
         """Fetch all files and folders recursively for a given Work Request."""
         results = {"inputs": [], "outputs": []}
-        expand = "related_id($select=id,keyed_name,file_size,classification,is_folder,local_file)"
+        expand = "related_id($select=id,keyed_name,file_size,,modified_on,classification,is_folder,local_file)"
 
         rel_map = {
             self.mapping.rel_wr_to_input: "inputs",
@@ -369,7 +372,7 @@ class OOTBService:
     def _task_files(self, task_id: str):
         """Fetch all files and folders recursively for a given Task."""
         results = {"inputs": [], "outputs": []}
-        expand = "related_id($select=id,keyed_name,file_size,classification,is_folder,local_file)"
+        expand = "related_id($select=id,keyed_name,file_size,,modified_on,classification,is_folder,local_file)"
 
         rel_map = {
             self.mapping.rel_task_to_input: "inputs",
@@ -416,6 +419,3 @@ def normalize_options(raw: Any) -> List[OptionSpec]:
             return out
         return []
 
-
-def get_item_type(row: dict) -> str:
-    return (row.get("item_type") or "").strip() or "UNKNOWN"

@@ -177,6 +177,66 @@ def render_badges(
 def badges_for_view(badges: list[Badge], view: str) -> list[Badge]:
     return [b for b in badges or [] if view in (b.views or ())]
 
+def render_copy_button(item_id: str | None, *, size: str = "sm", title: str = "Copy Item ID"):
+    if not item_id:
+        return None
+
+    return dcc.Clipboard(
+        content=item_id,
+        title=title,
+        children=html.I(className="bi bi-copy"),
+        style={
+            "cursor": "pointer",
+            "color": "#adb5bd",
+            "fontSize": "13px",
+            "marginLeft": "4px",
+        },
+    )
+
+
+def render_id_row(
+    item_id: str | None,
+    *,
+    label: str = "Item ID",
+    className: str = "small mt-2",
+):
+    if not item_id:
+        return None
+
+    return html.Div(
+        [
+            # html.Span(
+            #     f"{label}",
+            #     className="text-muted",
+            #     style={
+            #         "fontSize": "11px",
+            #         "lineHeight": "1.2",
+            #     },
+            # ),
+            html.Code(
+                item_id,
+                style={
+                    "fontSize": "10px",
+                    "fontFamily": "Consolas, Monaco, monospace",
+                    "color": "#6c757d",
+                    "backgroundColor": "#f8f9fa",
+                    "border": "1px solid #e9ecef",
+                    "borderRadius": "5px",
+                    "padding": "2px 6px",
+                    "userSelect": "text",
+                    "wordBreak": "break-all",
+                    "lineHeight": "1.2",
+                },
+            ),
+            render_copy_button(item_id, size="sm", title=f"Copy {label}"),
+        ],
+        className=f"d-flex align-items-center flex-wrap {className}".strip(),
+        style={
+            "columnGap": "6px",
+            "rowGap": "4px",
+        },
+    )
+
 def render_summary_title_block(
     summary: Summary,
     *,
@@ -187,9 +247,12 @@ def render_summary_title_block(
     badges_class: str = "mt-2",
     container_class: str = "w-100",
     badge_view: str | None = None,
+    copy_id: str | None = None,
+    copy_label: str = "Item ID",
+    show_copy_id_row: bool = False,
 ):
-    title_style = title_style or {}
-    subtitle_style = subtitle_style or {}
+    title_style = {**(title_style or {}), "userSelect": "text"}
+    subtitle_style = {**(subtitle_style or {}), "userSelect": "text"}
 
     visible_badges = (
         badges_for_view(summary.badges or [], badge_view)
@@ -209,6 +272,7 @@ def render_summary_title_block(
                 className=subtitle_class,
                 style=subtitle_style,
             ) if summary.subtitle else None,
+            render_id_row(copy_id, label=copy_label) if show_copy_id_row and copy_id else None,
             render_badges(
                 visible_badges,
                 className=badges_class,
@@ -217,7 +281,7 @@ def render_summary_title_block(
         className=container_class,
     )
 
-def render_header_from_details(details: DetailsData):
+def render_header_from_details(details: DetailsData, item_id: str | None = None):
     return html.Div(
         [
             render_summary_title_block(
@@ -234,13 +298,102 @@ def render_header_from_details(details: DetailsData):
                 },
                 badges_class="mt-3",
                 container_class="w-100",
-                 badge_view="header",
+                badge_view="header",
+                copy_id=item_id,
+                copy_label="Item ID",
+                show_copy_id_row=True,
             )
         ],
         className="bg-white p-3 rounded shadow-sm border-start border-primary border-4 mb-2",
+        style={"userSelect": "text"},
     )
 
 # ---- File UI helpers ----
+def sort_file_list(file_list: list[FileNode], sort_state: dict | None) -> list[FileNode]:
+    if not file_list:
+        return file_list
+
+    sort_state = sort_state or {"column": "name", "direction": "asc"}
+    column = sort_state.get("column", "name")
+    direction = sort_state.get("direction", "asc")
+    reverse = direction == "desc"
+
+    def safe_str(value):
+        return (value or "").lower()
+
+    def safe_num(value):
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def safe_modified(value):
+        return value or ""
+
+    def sort_key(node: FileNode):
+        if column == "name":
+            return safe_str(getattr(node, "name", None))
+        if column == "size":
+            return safe_num(getattr(node, "size", None))
+        if column == "modified":
+            return safe_modified(getattr(node, "modified_on", None))
+        return safe_str(getattr(node, "name", None))
+
+    class TreeItem:
+        def __init__(self, node: FileNode):
+            self.node = node
+            self.children: list["TreeItem"] = []
+
+    roots: list[TreeItem] = []
+    stack: list[TreeItem] = []
+
+    for node in file_list:
+        depth = getattr(node, "depth", 0) or 0
+        item = TreeItem(node)
+
+        while len(stack) > depth:
+            stack.pop()
+
+        if depth == 0 or not stack:
+            roots.append(item)
+        else:
+            stack[-1].children.append(item)
+
+        stack.append(item)
+
+    def sort_tree(items: list[TreeItem]):
+        items.sort(key=lambda x: sort_key(x.node), reverse=reverse)
+        for item in items:
+            if item.children:
+                sort_tree(item.children)
+
+    sort_tree(roots)
+
+    flattened: list[FileNode] = []
+
+    def flatten(items: list[TreeItem], depth: int = 0):
+        for item in items:
+            node = item.node
+            try:
+                node.depth = depth
+            except Exception:
+                pass
+            flattened.append(node)
+            flatten(item.children, depth + 1)
+
+    flatten(roots)
+    return flattened
+
+
+def render_sort_icon(sort_state: dict | None, column: str):
+    if not sort_state or sort_state.get("column") != column:
+        return html.I(className="bi bi-arrow-down-up ms-1 text-muted", style={"fontSize": "12px"})
+
+    if sort_state.get("direction") == "asc":
+        return html.I(className="bi bi-arrow-up ms-1", style={"fontSize": "12px"})
+
+    return html.I(className="bi bi-arrow-down ms-1", style={"fontSize": "12px"})
+
 def format_size(size_bytes):
     if size_bytes is None or size_bytes == 0:
         return "0 B"
@@ -255,19 +408,31 @@ def format_size(size_bytes):
     s = round(size_bytes / p, 2)
     return f"{s} {size_name[i]}"
 
+def format_datetime(dt):
+    if not dt:
+        return "-"
 
-def create_tree_table(file_list: list[FileNode], category: str, active_item: str):
+    if isinstance(dt, str):
+        return dt.replace("T", " ")[:16]
+
+    return str(dt)
+
+
+def create_tree_table(file_list: list[FileNode], category: str, active_item: str, sort_state: dict | None):
     if not file_list:
         return html.Div("No files found.", className="p-4 text-muted small text-center")
 
+    sorted_files = sort_file_list(file_list, sort_state)
+
     rows = []
-    for f in file_list:
+    for f in sorted_files:
         file_id = f.id
         file_name = f.name
         is_folder = f.is_folder
         vault_id = f.vault_id
         depth = f.depth or 0
         file_size = f.size or 0
+        modified_on = getattr(f, "modified_on", None)
 
         rows.append(
             html.Tr(
@@ -289,6 +454,11 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
                             "fontSize": "14px",
                         },
                         className="align-middle",
+                    ),
+                    html.Td(
+                        format_datetime(modified_on),
+                        className="text-muted align-middle",
+                        style={"fontSize": "13px", "paddingTop": "4px", "paddingBottom": "4px", "whiteSpace": "nowrap"},
                     ),
                     html.Td(
                         format_size(file_size) if not is_folder else "-",
@@ -315,7 +485,7 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
                                         src=dash.get_asset_url("icons/folder-download.svg" if is_folder else "icons/download.svg"),
                                         style={"width": "14px"},
                                     ),
-                                    id={"type": "btn-download", "index": file_id, "file_name": file_name, "category": category, "is_folder": is_folder, "vault_id":vault_id},
+                                    id={"type": "btn-download", "index": file_id, "file_name": file_name, "category": category, "is_folder": is_folder, "vault_id": vault_id},
                                     n_clicks=0,
                                     color="white",
                                     size="sm",
@@ -356,8 +526,37 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
             html.Thead(
                 html.Tr(
                     [
-                        html.Th("Name", className="ps-4"),
-                        html.Th("Size", className="text-end", style={"width": "100px"}),
+                        html.Th(
+                            html.Button(
+                                ["Name", render_sort_icon(sort_state, "name")],
+                                id={"type": "file-sort", "column": "name", "index": active_item},
+                                n_clicks=0,
+                                className="btn btn-link p-0 text-decoration-none fw-bold text-dark",
+                                style={"fontSize": "inherit"},
+                            ),
+                            className="ps-4",
+                        ),
+                        html.Th(
+                            html.Button(
+                                ["Modified", render_sort_icon(sort_state, "modified")],
+                                id={"type": "file-sort", "column": "modified", "index": active_item},
+                                n_clicks=0,
+                                className="btn btn-link p-0 text-decoration-none fw-bold text-dark",
+                                style={"fontSize": "inherit"},
+                            ),
+                            style={"width": "160px"},
+                        ),
+                        html.Th(
+                            html.Button(
+                                ["Size", render_sort_icon(sort_state, "size")],
+                                id={"type": "file-sort", "column": "size", "index": active_item},
+                                n_clicks=0,
+                                className="btn btn-link p-0 text-decoration-none fw-bold text-dark",
+                                style={"fontSize": "inherit"},
+                            ),
+                            className="text-end",
+                            style={"width": "100px"},
+                        ),
                         html.Th("Actions", className="text-center", style={"width": "180px"}),
                     ],
                     style={"lineHeight": "1.2"},
@@ -384,6 +583,8 @@ app.layout = dbc.Container(
     [
         dcc.Store(id="store-node-by-id", data={}),
         dcc.Store(id="store-selected", data={"level0": None, "level1": None, "level2": None}),
+        dcc.Store(id="store-file-sort", data={"column": "name", "direction": "asc", "index": None}),
+        dcc.Store(id="store-file-tab", data={"index": None, "active_tab": "tab-inputs"}),
         dbc.Row(
             [
                 dbc.Col(
@@ -558,6 +759,8 @@ def render_level0_item(node: NodeRef, details: DetailsData | None = None, active
 def update_level0_list(filter_values, filter_ids, selected):
     filters = build_filters(filter_values, filter_ids)
 
+    print("===== update_level0_list")
+
     level0_nodes = service.list_level0(filters=filters)
 
     if not level0_nodes:
@@ -594,24 +797,39 @@ def render_level1_section(level1_nodes: list[NodeRef]):
     return html.Div([dbc.Row(columns, className="g-3")], style={"maxHeight": "70vh", "overflowY": "auto", "padding": "10px"})
 
 def render_level1_card(node: NodeRef):
+    card_body = dbc.CardBody(
+        [
+            html.Div(
+                node.summary.title or "Item",
+                className="fw-bold mb-1",
+                style={
+                    "minHeight": "20px",
+                    "lineHeight": "1.25",
+                    "userSelect": "text",
+                },
+            ),
+            html.Div(
+                node.summary.subtitle,
+                className="text-muted mb-2",
+                style={"fontSize": "13px", "userSelect": "text"},
+            ) if node.summary.subtitle else None,
+
+            render_id_row(
+                node.id,
+                label="SR ID",
+                className="small mb-2"
+            ),
+
+            render_badges(
+                badges_for_view(node.summary.badges or [], "card"),
+                className="",
+            ) if badges_for_view(node.summary.badges or [], "card") else None,
+        ]
+    )
+
     return html.Div(
         dbc.Card(
-            dbc.CardBody(
-                [
-                    render_summary_title_block(
-                        node.summary,
-                        title_class="fw-bold mb-1",
-                        title_style={
-                            "minHeight": "20px",
-                            "lineHeight": "1.25",
-                        },
-                        subtitle_class="text-muted mb-2",
-                        subtitle_style={"fontSize": "13px"},
-                        badges_class="",
-                        badge_view="card",
-                    )
-                ]
-            ),
+            card_body,
             className="h-100 shadow-sm border-0 sr-card-hover",
             style={"borderRadius": "14px"},
         ),
@@ -640,6 +858,8 @@ def update_level0_view(n_clicks, node_map, selected):
     if not ctx.triggered_id or not any(n_clicks):
         return (dash.no_update,) * 7
 
+    print("===== update_level0_view")
+
     level0_id = ctx.triggered_id["index"]
     node_dict = (node_map or {}).get(level0_id)
 
@@ -651,12 +871,12 @@ def update_level0_view(n_clicks, node_map, selected):
         return dash.no_update, level1_title, level2_title, render_placeholder(f"{level0_title} not found."), dash.no_update, dash.no_update, dash.no_update
 
     level0_node = node_from_dict(node_dict)
-
     level0_details = service.get_details(level0_node)
+
     level1_nodes = service.get_children(level0_node).children
     node_map = merge_node_map(node_map, level1_nodes)
 
-    header = render_header_from_details(level0_details)
+    header = render_header_from_details(level0_details, item_id=level0_id)
 
     if not level1_nodes:
         level1_cards = render_placeholder(f"No {level1_title} found.")
@@ -695,6 +915,8 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
     if not any(n_clicks):
         return dash.no_update, [dash.no_update] * len(level1_ids), dash.no_update, dash.no_update, dash.no_update
 
+    print("===== update_level2_list")
+
     level1_id = ctx.triggered_id["index"]
 
     classnames = [
@@ -730,17 +952,29 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
         accordion_items.append(
             dbc.AccordionItem(
                 [dcc.Loading(html.Div(id={"type": "level2-detail-content", "index": n.id}, children="Loading details..."))],
-                title=render_summary_title_block(
-                    n.summary,
-                    title_class="fw-bold",
-                    title_style={
-                        "fontSize": "16px",
-                        "lineHeight": "1.2",
-                    },
-                    subtitle_class="text-muted small mt-1",
-                    subtitle_style={},
-                    badges_class="mt-2",
-                    badge_view="header",
+                title=html.Div(
+                    [
+                        html.Div(
+                            n.summary.title or "Item",
+                            className="fw-bold",
+                            style={
+                                "fontSize": "16px",
+                                "lineHeight": "1.2",
+                                "userSelect": "text",
+                            },
+                        ),
+                        html.Div(
+                            n.summary.subtitle,
+                            className="text-muted small mt-1",
+                            style={"userSelect": "text"},
+                        ) if n.summary.subtitle else None,
+
+                        render_badges(
+                            badges_for_view(n.summary.badges or [], "header"),
+                            className="mt-2",
+                        ) if badges_for_view(n.summary.badges or [], "header") else None,
+                    ],
+                    className="w-100",
                 ),
                 item_id=n.id,
             )
@@ -757,14 +991,18 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
 @callback(
     Output({"type": "level2-detail-content", "index": MATCH}, "children"),
     Input("level2-accordion-root", "active_item"),
+    Input("store-file-sort", "data"),
+    Input("store-file-tab", "data"),
     State({"type": "level2-detail-content", "index": MATCH}, "id"),
     State("store-node-by-id", "data"),
     prevent_initial_call=True,
 )
-def render_level2_details(active_item, component_id, node_map):
+def update_level2_details(active_item, sort_state, tab_state, component_id, node_map):
     current_id = component_id["index"]
     if active_item != current_id:
         return dash.no_update
+
+    print("===== update_level2_details")
 
     node_dict = (node_map or {}).get(current_id)
     if not node_dict:
@@ -785,8 +1023,17 @@ def render_level2_details(active_item, component_id, node_map):
             className="pb-2",
         )
 
+    current_sort = sort_state or {"column": "name", "direction": "asc", "index": None}
+    if current_sort.get("index") != current_id:
+        current_sort = {"column": "name", "direction": "asc", "index": current_id}
+
+    current_tab = "tab-inputs"
+    if tab_state and tab_state.get("index") == current_id:
+        current_tab = tab_state.get("active_tab", "tab-inputs")
+
     return html.Div(
         [
+            render_id_row(current_id, label="WR ID", className="small px-2 pt-2 mb-2"),
             html.Div(
                 [
                     dbc.Input(
@@ -802,14 +1049,14 @@ def render_level2_details(active_item, component_id, node_map):
             dbc.Tabs(
                 [
                     dbc.Tab(
-                        create_tree_table(inputs, "inputs", current_id),
+                        create_tree_table(inputs, "inputs", current_id, current_sort),
                         label=f"Input Files ({len(inputs)})",
                         tab_id="tab-inputs",
                         label_class_name="fw-bold text-primary",
                         className="p-2 border border-top-0 bg-white rounded-bottom",
                     ),
                     dbc.Tab(
-                        create_tree_table(outputs, "outputs", current_id),
+                        create_tree_table(outputs, "outputs", current_id, current_sort),
                         label=f"Output Files ({len(outputs)})",
                         tab_id="tab-outputs",
                         label_class_name="fw-bold text-success",
@@ -817,7 +1064,7 @@ def render_level2_details(active_item, component_id, node_map):
                     ),
                 ],
                 id={"type": "wr-tabs", "index": current_id},
-                active_tab="tab-inputs",
+                active_tab=current_tab,
             ),
         ],
         className="px-2 pb-2",
@@ -857,7 +1104,64 @@ clientside_callback(
     prevent_initial_call=True,
 )
 
+@callback(
+    Output("store-file-sort", "data"),
+    Input({"type": "file-sort", "column": ALL, "index": ALL}, "n_clicks"),
+    State({"type": "file-sort", "column": ALL, "index": ALL}, "id"),
+    State("store-file-sort", "data"),
+    prevent_initial_call=True,
+)
+def update_file_sort(n_clicks, ids, current_sort):
+    if not ctx.triggered_id:
+        return dash.no_update
 
+    triggered = ctx.triggered_id
+    column = triggered.get("column")
+    index = triggered.get("index")
+
+    current_sort = current_sort or {}
+    current_column = current_sort.get("column")
+    current_direction = current_sort.get("direction", "desc")
+    current_index = current_sort.get("index")
+
+    if current_column == column and current_index == index:
+        new_direction = "asc" if current_direction == "desc" else "desc"
+    else:
+        new_direction = "asc" if column == "name" else "desc"
+
+    return {
+        "column": column,
+        "direction": new_direction,
+        "index": index,
+    }
+
+@callback(
+    Output("store-file-tab", "data"),
+    Input({"type": "wr-tabs", "index": ALL}, "active_tab"),
+    State({"type": "wr-tabs", "index": ALL}, "id"),
+    State("store-file-tab", "data"),
+    prevent_initial_call=True,
+)
+def update_file_tab(active_tabs, ids, current_tab_state):
+    if not ctx.triggered_id:
+        return dash.no_update
+
+    triggered = ctx.triggered_id
+    index = triggered.get("index")
+
+    selected_tab = None
+    for tab_value, tab_id in zip(active_tabs or [], ids or []):
+        if tab_id.get("index") == index:
+            selected_tab = tab_value
+            break
+
+    if not selected_tab:
+        return dash.no_update
+
+    return {
+        "index": index,
+        "active_tab": selected_tab,
+    }
 
 @callback(
     [

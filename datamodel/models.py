@@ -40,6 +40,7 @@ BadgeColor = Literal[
 
 def status_color(status):
     s = str(status).lower() if status else ""
+    if any(x in s for x in ["new",]): return "secondary"
     if any(x in s for x in ["active", "open", "success", "running"]): return "light"
     if any(x in s for x in ["close", "closed", "complete", "paused"]): return "dark"
     if any(x in s for x in ["new","accepted"]): return "warning"
@@ -136,6 +137,8 @@ class BadgeBuilder:
             if s.fmt:
                 raw = s.fmt(raw, row)
 
+            #print("### badge ", s.key, ": ", raw)
+
             value = self._s(raw)
             if value is None:
                 continue
@@ -192,6 +195,7 @@ class FileNode:
     name: str
     is_folder: bool
     size: int = 0
+    modified_on: Optional[str] = None
     depth: int = 0
     vault_id: Optional[str] = None
     classification: Optional[str] = None
