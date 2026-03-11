@@ -4,17 +4,35 @@ import logging
 import functools
 import time
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Callable, Any, Optional, Union
+
 
 def log(
-    template: str,
+    template: Union[str, Callable[..., Any], None] = None,
     level: int = 20,
-    mode: Literal["before", "after", "both"] = "both"
+    mode: Literal["before", "after", "both"] = "both",
 ):
     """
     Decorator to log function execution details including arguments,
     return values, timestamps, and execution duration.
+
+    Supports both usages:
+      - @log("...template...")
+      - @log  (uses a default template)
     """
+
+    # Default template for bare @log usage
+    DEFAULT_TEMPLATE = "{status} {timestamp} {duration} {return_value}"
+
+    # If used as @log without parentheses, `template` is the function itself.
+    if callable(template):
+        func = template  # type: ignore[assignment]
+        return log(DEFAULT_TEMPLATE, level=level, mode=mode)(func)
+
+    # From here, template is str or None.
+    if template is None:
+        template = DEFAULT_TEMPLATE
+
     # Define reserved words that are injected by the decorator
     RESERVED_VARS = {"status", "return_value", "timestamp", "duration"}
     template_vars = {name for _, name, _, _ in string.Formatter().parse(template) if name}
@@ -38,8 +56,9 @@ def log(
             def get_now_str():
                 return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            # --- BEFORE EXECUTION ---
             start_time = time.time()
+
+            # --- BEFORE EXECUTION ---
             if mode in ("before", "both"):
                 context["status"] = "BEFORE"
                 context["return_value"] = "PENDING"
@@ -64,5 +83,7 @@ def log(
             except Exception as e:
                 logging.error(f"[ERROR] {func.__name__} failed: {e}")
                 raise
+
         return wrapper
+
     return decorator
