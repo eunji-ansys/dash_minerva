@@ -20,6 +20,19 @@
     color: inherit;
 } */
 
+.level0-list .list-group-item {
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.level0-list .list-group-item.active {
+  background-color: rgba(13, 110, 253, 0.10);
+  color: #212529;
+  border-color: transparent;
+}
+
+.level0-list .list-group-item.active .text-muted {
+  color: #495057 !important;
+}
 
 .level0-list .level0-list-item {
     position: relative;

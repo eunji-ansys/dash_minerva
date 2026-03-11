@@ -20,6 +20,7 @@ from datamodel.models import (
     FileSet,
     BadgeColor,
     merge_badge_specs,
+    status_color,
 )
 from logic.core.minerva.odata import MinervaODataClient
 from logic.core.minerva.cli import MinervaCLIClient
@@ -46,36 +47,13 @@ class TenantMapping:
     rel_task_to_output: str = "ans_SimTask_Output"
     rel_data_to_child_data: str = "Ans_DataChild"
 
-
-def normalize_options(raw: Any) -> List[OptionSpec]:
-        """
-        Normalize into Dash dropdown options: [{"label": ..., "value": ...}, ...]
-        """
-        if not raw:
-            return []
-        if isinstance(raw, list):
-            if all(isinstance(x, dict) and "label" in x and "value" in x for x in raw):
-                return raw
-            # allow list of primitives
-            out: List[OptionSpec] = []
-            for x in raw:
-                out.append({"label": str(x), "value": x})
-            return out
-        return []
-
-
-def get_item_type(row: dict) -> str:
-    return (row.get("item_type") or "").strip() or "UNKNOWN"
-
-
 class OOTBDisplayPolicy:
     def __init__(self, mapping: TenantMapping):
         self.mapping = mapping
         self._spec_by_item_type = {
             mapping.project_item_type: self._spec_project,
             mapping.wr_item_type: self._spec_wr,
-            # mapping.task_item_type: self._spec_task,
-            # mapping.data_item_type: self._spec_data,
+            mapping.task_item_type: self._spec_task,
         }
 
     def _fmt_date_short(self, v: Any, row: dict) -> Any:
@@ -89,37 +67,45 @@ class OOTBDisplayPolicy:
         return sv
 
     def _spec_project(self) -> SummarySpec:
-        print("### _spec_project CALLED from:", __file__)
         return SummarySpec(
-            title_keys=("item_number",),
-            subtitle_keys=("name",),
+            title_keys=("name",),
+            subtitle_keys=("item_number",),
             fallback_title="Project",
             badges=(
-                BadgeSpec("Owner", "modified_by_id", order=30, show_label=False, color="light"),
-                BadgeSpec("Created", "created_on", order=50, fmt=self._fmt_date_short, show_label=True, color="light")
+                BadgeSpec("Owner", "modified_by_id", order=30, show_label=False, color="light", views=("header",)),
+                BadgeSpec("Created", "created_on", order=50, fmt=self._fmt_date_short, show_label=True, color="light", views=("header",))
             ),
         )
 
     def _spec_wr(self) -> SummarySpec:
         return SummarySpec(
-            title_keys=("item_number", "keyed_name", "name"),
-            subtitle_keys=("description", "_model_name"),
+            title_keys=("name",),
+            subtitle_keys=("item_number",),
             fallback_title="Work Request",
             badges=(
-                BadgeSpec("State", "state", order=10, show_label=False, color="warning"),
-                BadgeSpec("Status", "status", order=20, show_label=False, color="light"),
-                BadgeSpec("Owner", "owned_by_id", order=30, show_label=False, color="light"),
-                BadgeSpec("Created", "created_on", order=40, fmt=self._fmt_date_short, show_label=False, color="light"),
-                BadgeSpec("Modified", "modified_on", order=50, fmt=self._fmt_date_short, show_label=True, color="light"),
-                BadgeSpec("Classification", "classification", order=60, show_label=False, color="light"),
-                BadgeSpec("Type", "_model_name", order=90, show_label=False, color="light"),
+                BadgeSpec("State", "current_state", order=10, show_label=False, color="warning", color_fn=status_color, views=("header",)),
+                BadgeSpec("Created", "created_on", order=40, fmt=self._fmt_date_short, show_label=True, color="light", views=("header",)),
+                BadgeSpec("Modified", "modified_on", order=50, fmt=self._fmt_date_short, show_label=True, color="light", views=("header",)),
+            ),
+        )
+
+    def _spec_task(self) -> SummarySpec:
+        return SummarySpec(
+            title_keys=("name",),
+            subtitle_keys=("item_number",),
+            fallback_title="Task",
+            badges=(
+                BadgeSpec("State", "current_state", order=10, show_label=False, color="warning", color_fn=status_color, views=("header",)),
+                BadgeSpec("Created", "created_on", order=40, fmt=self._fmt_date_short, show_label=True, color="light", views=("header",)),
+                BadgeSpec("Started", "date_start_actual", order=50, fmt=self._fmt_date_short, show_label=True, color="light", views=("header",)),
+                BadgeSpec("Assignees", "assignees", order=60, show_label=False, color="light", views=("header",)),
             ),
         )
 
     def _spec_default(self) -> SummarySpec:
         return SummarySpec(
             title_keys=("keyed_name", "name"),
-            subtitle_keys=("item_number", "description", "_model_name"),
+            subtitle_keys=("item_number", "description"),
             fallback_title="Item",
             badges=(),
         )
@@ -167,6 +153,23 @@ class OOTBService:
         self.display_policy = OOTBDisplayPolicy(self.mapping)
         self.badge_builder = BadgeBuilder()
 
+    DEFAULT_SECTION_TITLES = {
+        0: "Projects",
+        1: "Work Requests",
+        2: "Tasks",
+    }
+    ITEM_LABELS = {
+        0: "Project",
+        1: "Work Request",
+        2: "Task",
+    }
+
+    def default_section_title(self, level: int, fallback: str) -> str:
+        return self.DEFAULT_SECTION_TITLES.get(level, fallback)
+
+    def item_label(self, level: int, fallback: str) -> str:
+        return self.ITEM_LABELS.get(level, fallback)
+
     def get_filter_spec(self) -> FilterSpec:
         # Default: filters are not supported
         return {}
@@ -184,7 +187,7 @@ class OOTBService:
                          ]
         rows = self.odata.list(self.mapping.project_item_type, select=select_fields)
         print(f"list_level0: fetched {len(rows)} {self.mapping.project_item_type}")
-        return [
+        out = [
             NodeRef(
                 id=str(r["id"]),
                 kind=NodeKind.LEVEL0,  # Project
@@ -195,14 +198,39 @@ class OOTBService:
             )
             for r in rows
         ]
+        return out
 
-    def get_children(self, node: NodeRef) -> ChildrenResult:
-        """Resolve hierarchy: Project -> WR -> Task"""
-        if node.kind == NodeKind.LEVEL0:
-            return ChildrenResult(node, self._children_project_to_wr(node.id))
-        if node.kind == NodeKind.LEVEL1:
-            return ChildrenResult(node, self._children_wr_to_task(node.id))
-        return ChildrenResult(node, [])
+    def _children_project_to_wr(self, node_id: str) -> List[NodeRef]:
+        expand = "related_id($select=id,item_number,name,current_state,created_on,modified_on)"
+        rows = self.odata.list_related(self.mapping.project_item_type, node_id, self.mapping.rel_project_to_wr, expand=expand)
+        out = [
+            NodeRef(
+                id=str(r["id"]),
+                kind=NodeKind.LEVEL1,
+                summary=self._to_summary(r, item_type=self.mapping.wr_item_type),
+                item_type=self.mapping.wr_item_type,
+                role="WR",
+                can_expand=True,
+            )
+            for r in rows
+        ]
+        return out
+
+    def _children_wr_to_task(self, node_id: str) -> List[NodeRef]:
+        expand = "related_id($select=id,item_number,name,current_state,created_on,date_start_actual,assignees)"
+        rows = self.odata.list_related(self.mapping.wr_item_type, node_id, self.mapping.rel_wr_to_task, expand=expand)
+        out = [
+            NodeRef(
+                id=str(r["id"]),
+                kind=NodeKind.LEVEL2,
+                summary=self._to_summary(r, item_type=self.mapping.task_item_type),
+                item_type=self.mapping.task_item_type,
+                role="Task",
+                can_expand=None,
+            )
+            for r in rows
+        ]
+        return out
 
     def get_details(self, node: NodeRef) -> DetailsData:
         """Return summary and optional files"""
@@ -223,6 +251,14 @@ class OOTBService:
             return DetailsData(summary, files)
 
         return DetailsData({"id": node.id}, None)
+
+    def get_children(self, node: NodeRef) -> ChildrenResult:
+        """Resolve hierarchy: Project -> WR -> Task"""
+        if node.kind == NodeKind.LEVEL0:
+            return ChildrenResult(node, self._children_project_to_wr(node.id))
+        if node.kind == NodeKind.LEVEL1:
+            return ChildrenResult(node, self._children_wr_to_task(node.id))
+        return ChildrenResult(node, [])
 
     # ---------------- Internals ----------------
     def _to_summary(self, row: dict, *, item_type: str) -> Summary:
@@ -250,36 +286,14 @@ class OOTBService:
         subtitle = _pick_first(row, spec.subtitle_keys)
         badges = self.badge_builder.build(row, spec.badges)
 
+        # print("item_type =", item_type)
+        # print("row.name =", row.get("name"))
+        # print("row.item_number =", row.get("item_number"))
+        # print("title =", title)
+        # print("subtitle =", subtitle)
+        # print("badges =", badges)
+
         return Summary(title=title, subtitle=subtitle, badges=badges)
-
-    def _children_project_to_wr(self, node_id: str) -> List[NodeRef]:
-        rows = self.odata.list_related(self.mapping.project_item_type, node_id, self.mapping.rel_project_to_wr)
-        return [
-            NodeRef(
-                id=str(r["id"]),
-                kind=NodeKind.LEVEL1,
-                summary=self._to_summary(r, item_type=self.mapping.wr_item_type),
-                item_type=self.mapping.wr_item_type,
-                role="WR",
-                can_expand=True,
-            )
-            for r in rows
-        ]
-
-    def _children_wr_to_task(self, node_id: str) -> List[NodeRef]:
-        rows = self.odata.list_related(self.mapping.wr_item_type, node_id, self.mapping.rel_wr_to_task)
-        return [
-            NodeRef(
-                id=str(r["id"]),
-                kind=NodeKind.LEVEL2,
-                summary=self._to_summary(r, item_type=self.mapping.task_item_type),
-                item_type=self.mapping.task_item_type,
-                role="Task",
-                can_expand=None,
-            )
-            for r in rows
-        ]
-
 
     def _list_file_tree(
         self,
@@ -372,6 +386,7 @@ class OOTBService:
 
         return FileSet(results["inputs"], results["outputs"])
 
+    # ---------------- Download to Server ----------------
     def download_to_server_via_cli(self, ans_data_id: str, dest: str) -> str:
         ret = self.cli.download(remote=f"ans_Data/{ans_data_id}", local=dest)
         print(f"CLI download result: {ret}")
@@ -382,3 +397,25 @@ class OOTBService:
         ret = self.odata.download(vault_id, dest)
         print(f"OData download result: {ret}")
         return dest
+
+
+# ---------------- Utility Functions ----------------
+def normalize_options(raw: Any) -> List[OptionSpec]:
+        """
+        Normalize into Dash dropdown options: [{"label": ..., "value": ...}, ...]
+        """
+        if not raw:
+            return []
+        if isinstance(raw, list):
+            if all(isinstance(x, dict) and "label" in x and "value" in x for x in raw):
+                return raw
+            # allow list of primitives
+            out: List[OptionSpec] = []
+            for x in raw:
+                out.append({"label": str(x), "value": x})
+            return out
+        return []
+
+
+def get_item_type(row: dict) -> str:
+    return (row.get("item_type") or "").strip() or "UNKNOWN"

@@ -209,7 +209,7 @@ class MinervaODataClient:
             timeout=self.timeout,
             verify=self.verify,
         )
-        logging.debug(f"Response: response.text={response.text}")
+        #logging.debug(f"Response: response.text={response.text}")
 
         if response.status_code == 401 and retry_401:
             if self.auth.authenticate():
@@ -454,7 +454,6 @@ class MinervaODataClient:
     def download(self, vault_id: str, dest: str):
         path = f"File('{vault_id}')/$value"
         response = self.request_raw("GET", path)
-        print(f"status: {response.status_code} dest: {dest}")
         self._raise_for_status(response)
 
         with open(dest, "wb") as f:

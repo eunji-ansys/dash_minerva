@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Sequence, TypeAlias, TypedDict, List, Optional, Literal
+from typing import Any, Callable, Sequence, TypeAlias, TypedDict, List, Optional, Literal, Tuple
 
 
 class OptionSpec(TypedDict):
@@ -41,11 +41,11 @@ BadgeColor = Literal[
 def status_color(status):
     s = str(status).lower() if status else ""
     if any(x in s for x in ["active", "open", "success", "running"]): return "light"
-    if any(x in s for x in ["close", "closed", "complete"]): return "dark"
-    if any(x in s for x in ["new"]): return "warning"
+    if any(x in s for x in ["close", "closed", "complete", "paused"]): return "dark"
+    if any(x in s for x in ["new","accepted"]): return "warning"
     if any(x in s for x in ["progress", "queued", "in work"]): return "success"
-    if any(x in s for x in ["accepted", "in review"]): return "info"
-    if any(x in s for x in ["paused", "failed", "error"]): return "danger"
+    if any(x in s for x in ["in review"]): return "info"
+    if any(x in s for x in ["failed", "error"]): return "danger"
     return "secondary"
 
 @dataclass(frozen=True)
@@ -58,6 +58,7 @@ class BadgeSpec:
     show_label: bool = True
     color: Optional[BadgeColor] = None
     color_fn: Optional[Callable[[Any], BadgeColor]] = None
+    views: Tuple[str, ...] = ("sidebar", "header", "card")
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ class Badge:
     value: str
     show_label: bool = True
     color: BadgeColor = "light"
+    views: Tuple[str, ...] = ("sidebar", "header", "card")
 
 
 class BadgeBuilder:
@@ -144,6 +146,7 @@ class BadgeBuilder:
                     value=value,
                     show_label=s.show_label,
                     color=self._resolve_color(raw_value=raw, spec=s),
+                    views=s.views,
                 )
             )
 

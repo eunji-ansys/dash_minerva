@@ -15,6 +15,7 @@ from logic.services.ootb_service import (
     normalize_options,
 )
 from datamodel.models import (
+    OptionSpec,
     status_color,
     BadgeBuilder,
     NodeKind,
@@ -46,6 +47,7 @@ class VDDisplayPolicy:
         self._patch_by_item_type = {
             mapping.project_item_type: self._patch_vd_project,
             mapping.sr_item_type: self._patch_vd_sr,
+            mapping.wr_item_type: self._patch_vd_wr,
         }
 
     def select_spec(self, item_type: str) -> SummarySpec:
@@ -55,28 +57,52 @@ class VDDisplayPolicy:
 
     def _patch_vd_project(self, spec: SummarySpec) -> SummarySpec:
         return SummarySpec(
-            title_keys=("item_number", "name", "keyed_name"),
-            subtitle_keys=("_model_name", "name"),
+            title_keys=("name",),
+            subtitle_keys=("item_number",),
             fallback_title="Project",
-            badges=merge_badge_specs(spec.badges, (
-                BadgeSpec("State", "state", order=10, show_label=False, color="success", color_fn=status_color),
-                BadgeSpec("Year", "_development_year", order=20, show_label=False, color="secondary"),
-                BadgeSpec("Product", "_product_category", order=30, show_label=False, color="info"),
-                # BadgeSpec("Model", "_model_name", order=40, show_label=False, color="light"),
-            )),
+            badges=(
+                BadgeSpec("State", "state", order=10, show_label=False, color="success", color_fn=status_color, views=("sidebar",)),
+                BadgeSpec("Year", "_development_year", order=20, show_label=False, color="secondary",views=("sidebar",)),
+                BadgeSpec("Product", "_product_category", order=30, show_label=False, color="info", views=("sidebar",)),
+                BadgeSpec("Model", "_model_name", order=40, show_label=False, color="light", views=("header",)),
+                BadgeSpec("Created", "created_on", order=50, fmt=self.base._fmt_date_short, show_label=True, color="light", views=("header",))
+            ),
         )
+
+    def stage_color(self, stage):
+        s = str(stage).lower() if stage else ""
+        if any(x in s for x in ["pre"]): return "info"
+        if any(x in s for x in ["pv"]): return "warning"
+        if any(x in s for x in ["pr"]): return "success"
+        if any(x in s for x in ["sr"]): return "danger"
+        return "secondary"
 
     def _patch_vd_sr(self, spec: SummarySpec) -> SummarySpec:
         # Example: change subtitle priority and add VD badges
         return SummarySpec(
-            title_keys=("keyed_name", "name"),
-            subtitle_keys=("description", "item_number", "_model_name"),
+            title_keys=("keyed_name",),
+            subtitle_keys=("_simulation_type", ),
             fallback_title="Simulation Request",
-            badges=merge_badge_specs(spec.badges, (
-                BadgeSpec("State", "state", order=10, show_label=False, color="warning", color_fn=status_color),
-                BadgeSpec("Owner", "owned_by_id", order=30, show_label=False, color="light"),
-                BadgeSpec("Modified", "modified_on", order=50, fmt=self.base._fmt_date_short, show_label=True, color="light"),
-            )),
+            badges=(
+                BadgeSpec("State", "state", order=20, show_label=False, color="warning", color_fn=status_color, views=("card",)),
+                BadgeSpec("Stage", "_development_stage", order=30, show_label=False, color="light", color_fn=self.stage_color, views=("card",)),
+                BadgeSpec("Type", "_request_type", order=40, show_label=False, color="light", views=("card",)),
+                BadgeSpec("Created", "created_on", order=60, fmt=self.base._fmt_date_short, show_label=True, color="light", views=("card",)),
+                BadgeSpec("Target", "_target_date", order=70, fmt=self.base._fmt_date_short, show_label=True, color="light", views=("card",)),
+            ),
+        )
+
+    def _patch_vd_wr(self, spec: SummarySpec) -> SummarySpec:
+        # Example: change subtitle priority and add VD badges
+        return SummarySpec(
+            title_keys=("name",),
+            subtitle_keys=("item_number", ),
+            fallback_title="Work Request",
+            badges=(
+                BadgeSpec("State", "current_state", order=10, show_label=False, color="warning", color_fn=status_color, views=("header",)),
+                #BadgeSpec("Created", "created_on", order=60, fmt=self.base._fmt_date_short, show_label=True, color="light", views=("header",)),
+                BadgeSpec("Modified", "modified_on", order=60, fmt=self.base._fmt_date_short, show_label=True, color="light", views=("header",)),
+            ),
         )
 
 class VDService(OOTBService):
@@ -105,6 +131,17 @@ class VDService(OOTBService):
         # Patch display policy to include VD-only item types
         self.display_policy = VDDisplayPolicy(OOTBDisplayPolicy(self.mapping), self.mapping)
         self.badge_builder = BadgeBuilder()
+
+    DEFAULT_SECTION_TITLES = {
+        0: "Projects",
+        1: "Simulation Requests",
+        2: "Work Requests",
+    }
+    ITEM_LABELS = {
+        0: "Project",
+        1: "Simulation Request",
+        2: "Work Request",
+    }
 
     def get_filter_spec(self) -> FilterSpec:
         year_opts = normalize_options(self.get_filter_years())
@@ -206,6 +243,18 @@ class VDService(OOTBService):
 
     def _children_project_to_sr(self, node_id: str) -> List[NodeRef]:
         filter = f"_project_id eq '{node_id}'"
+        select_fields = ["id",
+                         "_item_number",
+                         "_name",
+                         "state",
+                         "_development_stage",
+                         "_request_type",
+                         "_simulation_type",
+                         "created_on",
+                         "_target_date",
+                         "_background",
+                         ]
+
         rows = self.odata.list("VD_SimulationRequest", filter=filter)
         return [
             NodeRef(
@@ -220,7 +269,8 @@ class VDService(OOTBService):
         ]
 
     def _children_sr_to_wr(self, node_id: str) -> List[NodeRef]:
-        rows = self.odata.list_related(self.mapping.sr_item_type, node_id, self.mapping.rel_sr_to_wr)
+        expand = "related_id($select=id,item_number,name,keyed_name,current_state,created_on,modified_on,_simulation_type)"
+        rows = self.odata.list_related(self.mapping.sr_item_type, node_id, self.mapping.rel_sr_to_wr, expand=expand)
         return [
             NodeRef(
                 id=str(r["id"]),
@@ -232,4 +282,5 @@ class VDService(OOTBService):
             )
             for r in rows
         ]
+
 

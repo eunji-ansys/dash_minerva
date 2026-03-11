@@ -2,6 +2,7 @@ import re
 import os
 import uuid
 import shutil
+import json
 from pathlib import Path
 import math
 from typing import Any, List, TypedDict, TypeAlias
@@ -80,6 +81,7 @@ def node_to_dict(n: NodeRef) -> dict:
                 "value": b.value,
                 "show_label": b.show_label,
                 "color": b.color,
+                "views": list(b.views),
             }
             for b in (n.summary.badges or [])
         ],
@@ -101,6 +103,7 @@ def node_from_dict(d: dict) -> NodeRef:
                     value=b["value"],
                     show_label=b.get("show_label", True),
                     color=b.get("color", "light"),
+                    views=tuple(b.get("views", ("sidebar","header","card"))),
                 )
                 for b in d.get("badges", [])
             ],
@@ -141,23 +144,6 @@ def resolve_default_value(spec: FilterFieldSpec) -> Any:
 
 
 # ---- Summary rendering helpers ----
-def _summary_badges_to_ui(badges: list[Badge]) -> list:
-    out = []
-    for b in badges or []:
-        text = b.value if not b.show_label else f"{b.label}: {b.value}"
-        text_color = "dark" if b.color == "light" else "white"
-
-        out.append(
-            dbc.Badge(
-                text,
-                color=b.color,
-                text_color=text_color,
-                className="border",
-            )
-        )
-
-    return out
-
 def render_badges(
     badges: list[Badge],
     *,
@@ -167,59 +153,92 @@ def render_badges(
     if not badges:
         return None
 
+    components = []
+
+    for b in badges:
+        text = b.value if not b.show_label else f"{b.label}: {b.value}"
+        text_color = "dark" if b.color == "light" else "white"
+
+        components.append(
+            dbc.Badge(
+                text,
+                color=b.color,
+                text_color=text_color,
+                className="border",
+            )
+        )
+
     return html.Div(
-        _summary_badges_to_ui(badges),
+        components,
         className=f"d-flex flex-wrap align-items-center {gap_class} {className}".strip(),
-        style={
-            "rowGap": "6px",
-        },
+        style={"rowGap": "6px"},
     )
 
-def render_header_from_details(details: DetailsData):
-    s = details.summary
-    title = s.title or "Item"
-    subtitle = s.subtitle or ""
-    badges = _summary_badges_to_ui(s.badges)
+def badges_for_view(badges: list[Badge], view: str) -> list[Badge]:
+    return [b for b in badges or [] if view in (b.views or ())]
+
+def render_summary_title_block(
+    summary: Summary,
+    *,
+    title_class: str = "fw-bold",
+    title_style: dict | None = None,
+    subtitle_class: str = "text-muted",
+    subtitle_style: dict | None = None,
+    badges_class: str = "mt-2",
+    container_class: str = "w-100",
+    badge_view: str | None = None,
+):
+    title_style = title_style or {}
+    subtitle_style = subtitle_style or {}
+
+    visible_badges = (
+        badges_for_view(summary.badges or [], badge_view)
+        if badge_view
+        else (summary.badges or [])
+    )
 
     return html.Div(
         [
             html.Div(
-                [
-                    html.H2(title, className="fw-bold d-inline-block me-3 mb-0"),
-                    html.Span(subtitle, className="text-muted ms-1"),
-                ],
-                className="d-flex align-items-baseline flex-wrap gap-2",
+                summary.title or "Item",
+                className=title_class,
+                style=title_style,
             ),
-            html.Div(badges, className="mt-2 d-flex flex-wrap"),
+            html.Div(
+                summary.subtitle,
+                className=subtitle_class,
+                style=subtitle_style,
+            ) if summary.subtitle else None,
+            render_badges(
+                visible_badges,
+                className=badges_class,
+            ) if visible_badges else None,
+        ],
+        className=container_class,
+    )
+
+def render_header_from_details(details: DetailsData):
+    return html.Div(
+        [
+            render_summary_title_block(
+                details.summary,
+                title_class="fw-bold mb-0",
+                title_style={
+                    "fontSize": "1.75rem",
+                    "lineHeight": "1.2",
+                },
+                subtitle_class="text-muted",
+                subtitle_style={
+                    "fontSize": "1rem",
+                    "marginTop": "4px",
+                },
+                badges_class="mt-3",
+                container_class="w-100",
+                 badge_view="header",
+            )
         ],
         className="bg-white p-3 rounded shadow-sm border-start border-primary border-4 mb-2",
     )
-
-
-# ---- Dynamic section title helpers (NO tenant branching) ----
-ROLE_TITLE_MAP = {
-    "Project": "Projects",
-    "SR": "Simulation Requests",
-    "WR": "Work Requests",
-    "Task": "Tasks",
-}
-
-def role_to_section_title(role: str | None, fallback: str) -> str:
-    if not role:
-        return fallback
-    return ROLE_TITLE_MAP.get(role, role)
-
-
-def infer_children_role_title(children: list[NodeRef], fallback: str) -> str:
-    """
-    Infer a section title from children roles.
-    If multiple roles appear, choose the first non-empty; otherwise fallback.
-    """
-    for c in children or []:
-        if c.role:
-            return role_to_section_title(c.role, fallback)
-    return fallback
-
 
 # ---- File UI helpers ----
 def format_size(size_bytes):
@@ -373,7 +392,7 @@ app.layout = dbc.Container(
                             [
                                 html.Div(
                                     [
-                                        html.H4("Projects", className="fw-bold mb-3"),
+                                        html.H4(service.default_section_title(0, "Projects"), className="fw-bold mb-3"),
                                         dbc.Row(id="filter-container", className="g-2 mb-3"),
                                         html.Hr(className="mt-2"),
                                     ],
@@ -402,14 +421,14 @@ app.layout = dbc.Container(
                                     id="level0-header-area",
                                     children=[
                                         html.H4("Dashboard", className="fw-bold text-dark mb-1"),
-                                        dcc.Loading(html.P("Select a Level 0 item from the sidebar to load data.", className="text-muted small")),
+                                        dcc.Loading(html.P(f"Select a {service.item_label(0, 'Level 0')} from the sidebar to load data.", className="text-muted small")),
                                     ],
                                     className="mb-4",
                                 ),
 
                                 # Dynamic titles
-                                html.H6(id="level1-title", children="Level 1", className="fw-bold text-secondary mb-3"),
-                                dcc.Loading(id="level1-cards-area", children=render_placeholder("Please select a Level 0 item.")),
+                                html.H6(id="level1-title", children=service.default_section_title(1, "Level 1"), className="fw-bold text-secondary mb-3"),
+                                dcc.Loading(id="level1-cards-area", children=render_placeholder(f"Please select a {service.item_label(1, 'Level 1')} item.")),
 
                                 dcc.Loading(
                                     id="loading-download",
@@ -419,8 +438,8 @@ app.layout = dbc.Container(
                                     className="text-muted small",
                                 ),
 
-                                html.H6(id="level2-title", children="Level 2 + Files", className="fw-bold text-secondary mb-3 mt-4"),
-                                html.Div(id="level2-accordion-area", children=render_placeholder("Select a Level 1 card.")),
+                                html.H6(id="level2-title", children=service.default_section_title(2, "Level 2"), className="fw-bold text-secondary mb-3 mt-4"),
+                                html.Div(id="level2-accordion-area", children=render_placeholder(f"Select a {service.item_label(2, 'Level 2')} card.")),
 
                                 html.Div(id="footer-status", className="mt-5 pt-3 border-top text-muted small"),
                             ],
@@ -490,34 +509,35 @@ def render_filters(_):
     return build_filter_components(filter_spec)
 
 def render_level0_item(node: NodeRef, details: DetailsData | None = None, active: bool = False):
-    title = node.summary.title
-    subtitle = node.summary.subtitle
-    state_text = node.role or "LEVEL0"
-
-    badges = []
-    if node.summary and node.summary.badges:
-        badges = node.summary.badges
-    elif details and details.summary and details.summary.badges:
-        badges = details.summary.badges
-
-    badge_block = render_badges(badges, className="mt-2")
+    summary = node.summary if node.summary else (details.summary if details else Summary(title=node.id))
+    badges = badges_for_view(node.summary.badges, "sidebar") if node.summary else []
 
     return dbc.ListGroupItem(
         [
             html.Div(
                 [
                     html.Div(
-                        [
-                            html.Div(title, className="level0-title", style={"fontSize": "14px"}),
-                            html.Div(subtitle or "",
-                                      className="level0-subtitle",
-                                      style={"fontSize": "11px", "marginTop": "2px"}),
-                            badge_block,
-                        ],
-                        style={"flex": "1", "minWidth": "0"},
+                        summary.title or "Item",
+                        className="fw-semibold text-truncate",
+                        style={
+                            "fontSize": "14px",
+                            "lineHeight": "1.25",
+                        },
                     ),
+                    html.Div(
+                        summary.subtitle,
+                        className="text-muted text-truncate mt-1",
+                        style={
+                            "fontSize": "12px",
+                            "lineHeight": "1.2",
+                        },
+                    ) if summary.subtitle else None,
+                    render_badges(
+                        badges,
+                        className="mt-2",
+                    ) if badges else None,
                 ],
-                className="d-flex justify-content-between align-items-center",
+                className="min-w-0",
             )
         ],
         id={"type": "level0-item", "index": node.id},
@@ -539,7 +559,6 @@ def update_level0_list(filter_values, filter_ids, selected):
     filters = build_filters(filter_values, filter_ids)
 
     level0_nodes = service.list_level0(filters=filters)
-    print(f"update_level0_list [0] item_type = {level0_nodes[0].item_type}")
 
     if not level0_nodes:
         return html.Div("No items found.", className="text-muted p-3 small text-center"), {}
@@ -574,29 +593,28 @@ def render_level1_section(level1_nodes: list[NodeRef]):
     ]
     return html.Div([dbc.Row(columns, className="g-3")], style={"maxHeight": "70vh", "overflowY": "auto", "padding": "10px"})
 
-
 def render_level1_card(node: NodeRef):
     return html.Div(
-        [
-            dbc.Card(
+        dbc.Card(
+            dbc.CardBody(
                 [
-                    dbc.CardBody(
-                        [
-                            html.Div(
-                                [
-                                    html.Small(node.role, className="text-muted fw-bold", style={"fontSize": "11px"}),
-                                    dbc.Badge(node.item_type, color="light", text_color="dark", pill=True, style={"fontSize": "10px"}, className="border"),
-                                ],
-                                className="d-flex justify-content-between align-items-center mb-2",
-                            ),
-                            html.H6(node.summary.title, className="fw-bold mb-3", style={"height": "18px", "overflow": "hidden"}),
-                            html.Div([html.Div([html.I(className="bi bi-hash me-2"), node.id], className="small text-muted")], className="border-top pt-2"),
-                        ]
+                    render_summary_title_block(
+                        node.summary,
+                        title_class="fw-bold mb-1",
+                        title_style={
+                            "minHeight": "20px",
+                            "lineHeight": "1.25",
+                        },
+                        subtitle_class="text-muted mb-2",
+                        subtitle_style={"fontSize": "13px"},
+                        badges_class="",
+                        badge_view="card",
                     )
-                ],
-                className="h-100 shadow-sm border-0 sr-card-hover",
-            )
-        ],
+                ]
+            ),
+            className="h-100 shadow-sm border-0 sr-card-hover",
+            style={"borderRadius": "14px"},
+        ),
         id={"type": "level1-card", "index": node.id},
         n_clicks=0,
         style={"cursor": "pointer", "width": "100%"},
@@ -624,8 +642,13 @@ def update_level0_view(n_clicks, node_map, selected):
 
     level0_id = ctx.triggered_id["index"]
     node_dict = (node_map or {}).get(level0_id)
+
+    level0_title = service.default_section_title(0, "Level 0")
+    level1_title = service.default_section_title(1, "Level 1")
+    level2_title = service.default_section_title(2, "Level 2")
+
     if not node_dict:
-        return dash.no_update, "Level 1", "Level 2 + Files", render_placeholder("LEVEL0 not found."), dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, level1_title, level2_title, render_placeholder(f"{level0_title} not found."), dash.no_update, dash.no_update, dash.no_update
 
     level0_node = node_from_dict(node_dict)
 
@@ -635,12 +658,8 @@ def update_level0_view(n_clicks, node_map, selected):
 
     header = render_header_from_details(level0_details)
 
-    # Dynamic titles inferred from children roles (NO tenant branching)
-    level1_title = infer_children_role_title(level1_nodes, "Level 1")
-    level2_title = "Level 2 + Files"  # unknown until a level1 node is selected
-
     if not level1_nodes:
-        level1_cards = render_placeholder("No Level 1 items found for this Level 0.")
+        level1_cards = render_placeholder(f"No {level1_title} found.")
     else:
         level1_cards = render_level1_section(level1_nodes)
 
@@ -652,7 +671,7 @@ def update_level0_view(n_clicks, node_map, selected):
         level1_title,
         level2_title,
         level1_cards,
-        render_placeholder("Select a Level 1 card to see Level 2 + files.", height="250px"),
+        render_placeholder(f"Select a {service.item_label(1, 'Level 1')} card to continue.", height="250px"),
         new_selected,
         node_map,
     )
@@ -684,29 +703,45 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
         for sid in level1_ids
     ]
 
+    level1_title = service.default_section_title(1, "Level 1")
+    level2_title = service.default_section_title(2, "Level 2")
+
     node_dict = (node_map or {}).get(level1_id)
     if not node_dict:
-        return render_placeholder("Level 1 node not found."), classnames, "Level 2 + Files", dash.no_update, dash.no_update
-
+        return render_placeholder(f"{level1_title} node not found."), classnames, f"{level2_title}", dash.no_update, dash.no_update
     level1_node = node_from_dict(node_dict)
 
     level2_nodes = service.get_children(level1_node).children
     node_map = merge_node_map(node_map, level2_nodes)
 
-    # Dynamic title based on children role (NO tenant branching)
-    level2_title = infer_children_role_title(level2_nodes, "Level 2 + Files")
-
     if not level2_nodes:
         new_selected = dict(selected or {})
         new_selected.update({"level1": level1_id, "level2": None})
-        return html.Div("No Level 2 items found.", className="p-4 text-center text-muted"), classnames, level2_title, new_selected, node_map
+        return (
+            html.Div(f"No {level2_title} found.", className="p-4 text-center text-muted"),
+            classnames,
+            level2_title,
+            new_selected,
+            node_map,
+        )
 
     accordion_items = []
     for n in level2_nodes:
         accordion_items.append(
             dbc.AccordionItem(
                 [dcc.Loading(html.Div(id={"type": "level2-detail-content", "index": n.id}, children="Loading details..."))],
-                title=html.Div([html.B(n.summary.title), html.Span(f"  ({n.role})", className="ms-2 text-muted small")], className="w-100"),
+                title=render_summary_title_block(
+                    n.summary,
+                    title_class="fw-bold",
+                    title_style={
+                        "fontSize": "16px",
+                        "lineHeight": "1.2",
+                    },
+                    subtitle_class="text-muted small mt-1",
+                    subtitle_style={},
+                    badges_class="mt-2",
+                    badge_view="header",
+                ),
                 item_id=n.id,
             )
         )
@@ -739,17 +774,16 @@ def render_level2_details(active_item, component_id, node_map):
     details = service.get_details(node)
 
     files = details.files
+    inputs = files.inputs or [] if files else []
+    outputs = files.outputs or [] if files else []
+
     if not files:
         return html.Div(
             [
-                html.Div(_summary_badges_to_ui(details.summary.badges), className="mb-2 d-flex flex-wrap"),
-                html.Div("No files for this item.", className="text-muted small"),
+                html.Div("No files for this item.", className="px-2 text-muted small"),
             ],
-            className="px-2 pb-2",
+            className="pb-2",
         )
-
-    inputs = files.inputs or []
-    outputs = files.outputs or []
 
     return html.Div(
         [
@@ -789,7 +823,6 @@ def render_level2_details(active_item, component_id, node_map):
         className="px-2 pb-2",
     )
 
-
 clientside_callback(
     """
     function(search_term, content_id) {
@@ -824,8 +857,7 @@ clientside_callback(
     prevent_initial_call=True,
 )
 
-import json
-import shutil
+
 
 @callback(
     [
