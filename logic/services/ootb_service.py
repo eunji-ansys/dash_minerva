@@ -13,13 +13,10 @@ from datamodel.models import (
     NodeKind,
     NodeRef,
     Summary,
-    Badge,
     DetailsData,
     ChildrenResult,
     FileNode,
     FileSet,
-    BadgeColor,
-    merge_badge_specs,
     status_color,
 )
 from logic.core.minerva.odata import MinervaODataClient
@@ -27,7 +24,8 @@ from logic.core.minerva.cli import MinervaCLIClient
 
 import logging
 from ..utils.decorators import log
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 
 @dataclass(frozen=True)
@@ -46,6 +44,7 @@ class TenantMapping:
     rel_task_to_input: str = "ans_SimTask_Input"
     rel_task_to_output: str = "ans_SimTask_Output"
     rel_data_to_child_data: str = "Ans_DataChild"
+
 
 class OOTBDisplayPolicy:
     def __init__(self, mapping: TenantMapping):
@@ -72,8 +71,23 @@ class OOTBDisplayPolicy:
             subtitle_keys=("item_number",),
             fallback_title="Project",
             badges=(
-                BadgeSpec("Owner", "modified_by_id", order=30, show_label=False, color="light", views=("header",)),
-                BadgeSpec("Created", "created_on", order=50, fmt=self._fmt_date_short, show_label=True, color="light", views=("sidebar",))
+                BadgeSpec(
+                    "Owner",
+                    "modified_by_id",
+                    order=30,
+                    show_label=False,
+                    color="light",
+                    views=("header",),
+                ),
+                BadgeSpec(
+                    "Created",
+                    "created_on",
+                    order=50,
+                    fmt=self._fmt_date_short,
+                    show_label=True,
+                    color="light",
+                    views=("sidebar",),
+                ),
             ),
         )
 
@@ -83,9 +97,33 @@ class OOTBDisplayPolicy:
             subtitle_keys=("item_number",),
             fallback_title="Work Request",
             badges=(
-                BadgeSpec("State", "state", order=10, show_label=False, color="warning", color_fn=status_color, views=("card",)),
-                BadgeSpec("Created", "created_on", order=40, fmt=self._fmt_date_short, show_label=True, color="light", views=("card",)),
-                BadgeSpec("Modified", "modified_on", order=50, fmt=self._fmt_date_short, show_label=True, color="light", views=("card",)),
+                BadgeSpec(
+                    "State",
+                    "state",
+                    order=10,
+                    show_label=False,
+                    color="warning",
+                    color_fn=status_color,
+                    views=("card",),
+                ),
+                BadgeSpec(
+                    "Created",
+                    "created_on",
+                    order=40,
+                    fmt=self._fmt_date_short,
+                    show_label=True,
+                    color="light",
+                    views=("card",),
+                ),
+                BadgeSpec(
+                    "Modified",
+                    "modified_on",
+                    order=50,
+                    fmt=self._fmt_date_short,
+                    show_label=True,
+                    color="light",
+                    views=("card",),
+                ),
             ),
         )
 
@@ -95,10 +133,41 @@ class OOTBDisplayPolicy:
             subtitle_keys=("item_number",),
             fallback_title="Task",
             badges=(
-                BadgeSpec("State", "state", order=10, show_label=False, color="warning", color_fn=status_color, views=("header",)),
-                BadgeSpec("Created", "created_on", order=40, fmt=self._fmt_date_short, show_label=True, color="light", views=("header",)),
-                BadgeSpec("Started", "date_start_actual", order=50, fmt=self._fmt_date_short, show_label=True, color="light", views=("header",)),
-                BadgeSpec("Assignees", "assignees", order=60, show_label=False, color="secondary", views=("header",)),
+                BadgeSpec(
+                    "State",
+                    "state",
+                    order=10,
+                    show_label=False,
+                    color="warning",
+                    color_fn=status_color,
+                    views=("header",),
+                ),
+                BadgeSpec(
+                    "Created",
+                    "created_on",
+                    order=40,
+                    fmt=self._fmt_date_short,
+                    show_label=True,
+                    color="light",
+                    views=("header",),
+                ),
+                BadgeSpec(
+                    "Started",
+                    "date_start_actual",
+                    order=50,
+                    fmt=self._fmt_date_short,
+                    show_label=True,
+                    color="light",
+                    views=("header",),
+                ),
+                BadgeSpec(
+                    "Assignees",
+                    "assignees",
+                    order=60,
+                    show_label=False,
+                    color="secondary",
+                    views=("header",),
+                ),
             ),
         )
 
@@ -115,41 +184,59 @@ class OOTBDisplayPolicy:
         return spec()
 
 
-
 class OOTBService:
     """
     Provides UI contract for OOTB Minerva schema.
     The service owns auth, OData, and CLI clients directly.
+
+    Compatible with the existing service_factory.py, which may pass:
+      - base_url
+      - database
+      - username
+      - password
+      - api_base_path
+      - api_key
+      - cli_exe_path
     """
 
     def __init__(
         self,
         *,
         base_url: str,
-        database: str,
-        username: str,
-        password: str,
+        database: Optional[str] = None,
+        username: Optional[str] = None,
+        password: Optional[str] = None,
+        api_base_path: str = "/server/odata",
+        api_key: Optional[str] = None,
         cli_exe_path: Optional[str] = None,
         mapping: Optional[TenantMapping] = None,
+        **_: Any,
     ):
         self.mapping = mapping or TenantMapping()
 
-        # Create infrastructure clients internally
+        # OData client supports both:
+        # - api_key based new web service
+        # - legacy username/password/database OAuth flow
         self.odata = MinervaODataClient(
             base_url=base_url,
             database=database,
             username=username,
             password=password,
-        )
-        self.cli = MinervaCLIClient(
-            base_url=base_url,
-            database=database,
-            username=username,
-            password=password,
-            cli_exe_path=cli_exe_path,
+            api_base_path=api_base_path,
+            api_key=api_key,
         )
 
-        # Display policy (summary/badges)
+        # CLI client is legacy-auth oriented. Build only when legacy credentials exist.
+        self.cli: Optional[MinervaCLIClient] = None
+        if username and password and database:
+            self.cli = MinervaCLIClient(
+                base_url=base_url,
+                database=database,
+                username=username,
+                password=password,
+                cli_exe_path=cli_exe_path,
+            )
+
         self.display_policy = OOTBDisplayPolicy(self.mapping)
         self.badge_builder = BadgeBuilder()
 
@@ -171,26 +258,26 @@ class OOTBService:
         return self.ITEM_LABELS.get(level, fallback)
 
     def get_filter_spec(self) -> FilterSpec:
-        # Default: filters are not supported
         return {}
 
     # ---------------- UI Contract ----------------
 
     def list_level0(self, *, filters: Optional[dict[str, Any]] = None) -> List[NodeRef]:
         """Return Project nodes"""
-        select_fields = ["id",
-                         "item_number",
-                         "keyed_name",
-                         "name",
-                         "created_on",
-                         "modified_on",
-                         ]
+        select_fields = [
+            "id",
+            "item_number",
+            "keyed_name",
+            "name",
+            "created_on",
+            "modified_on",
+        ]
         rows = self.odata.list(self.mapping.project_item_type, select=select_fields)
         print(f"list_level0: fetched {len(rows)} {self.mapping.project_item_type}")
-        out = [
+        return [
             NodeRef(
                 id=str(r["id"]),
-                kind=NodeKind.LEVEL0,  # Project
+                kind=NodeKind.LEVEL0,
                 summary=self._to_summary(r, item_type=self.mapping.project_item_type),
                 item_type=self.mapping.project_item_type,
                 role="Project",
@@ -198,13 +285,15 @@ class OOTBService:
             )
             for r in rows
         ]
-        return out
 
     def _children_project_to_wr(self, node_id: str) -> List[NodeRef]:
-        expand = "related_id" #($select=id,item_number,name,current_state,created_on,modified_on)
-        rows = self.odata.list_related(self.mapping.project_item_type, node_id, self.mapping.rel_project_to_wr, expand=expand)
-
-        out = [
+        rows = self.odata.list_related(
+            self.mapping.project_item_type,
+            node_id,
+            self.mapping.rel_project_to_wr,
+            expand="related_id",
+        )
+        return [
             NodeRef(
                 id=str(r["id"]),
                 kind=NodeKind.LEVEL1,
@@ -215,13 +304,15 @@ class OOTBService:
             )
             for r in rows
         ]
-        return out
 
     def _children_wr_to_task(self, node_id: str) -> List[NodeRef]:
-        expand = "related_id" #($select=id,item_number,name,current_state,created_on,date_start_actual,assignees)
-        rows = self.odata.list_related(self.mapping.wr_item_type, node_id, self.mapping.rel_wr_to_task, expand=expand)
-
-        out = [
+        rows = self.odata.list_related(
+            self.mapping.wr_item_type,
+            node_id,
+            self.mapping.rel_wr_to_task,
+            expand="related_id",
+        )
+        return [
             NodeRef(
                 id=str(r["id"]),
                 kind=NodeKind.LEVEL2,
@@ -232,7 +323,6 @@ class OOTBService:
             )
             for r in rows
         ]
-        return out
 
     def get_details(self, node: NodeRef) -> DetailsData:
         """Return summary and optional files"""
@@ -244,7 +334,7 @@ class OOTBService:
         if node.kind == NodeKind.LEVEL1:
             raw = self.odata.get(self.mapping.wr_item_type, node.id)
             summary = self._to_summary(raw, item_type=self.mapping.wr_item_type)
-            return DetailsData(summary, files)
+            return DetailsData(summary, None)
 
         if node.kind == NodeKind.LEVEL2:
             raw = self.odata.get(self.mapping.task_item_type, node.id)
@@ -263,12 +353,8 @@ class OOTBService:
         return ChildrenResult(node, [])
 
     # ---------------- Internals ----------------
-    def _to_summary(self, row: dict, *, item_type: str) -> Summary:
-        """Build a UI Summary using the display policy (spec-based).
 
-        This keeps the service tenant-agnostic while allowing per-item-type
-        customization via SummarySpec / BadgeSpec.
-        """
+    def _to_summary(self, row: dict, *, item_type: str) -> Summary:
         spec = self.display_policy.select_spec(item_type)
 
         def _pick_first(row: dict, keys: Sequence[str]) -> Optional[str]:
@@ -288,13 +374,6 @@ class OOTBService:
         subtitle = _pick_first(row, spec.subtitle_keys)
         badges = self.badge_builder.build(row, spec.badges)
 
-        # print("item_type =", item_type)
-        # print("row.name =", row.get("name"))
-        # print("row.item_number =", row.get("item_number"))
-        # print("title =", title)
-        # print("subtitle =", subtitle)
-        # print("badges =", badges)
-
         return Summary(title=title, subtitle=subtitle, badges=badges)
 
     def _list_file_tree(
@@ -309,10 +388,10 @@ class OOTBService:
         Recursively collect files/folders starting from a root item.
         Depth 0:
             root_item_type + root_relationship_name
-            e.g. WR -> Ans_SimReq_Input
         Depth > 0:
             Ans_Data -> Ans_DataChild
         """
+
         def _recurse(parent_id: str, depth: int) -> List[FileNode]:
             flattened: List[FileNode] = []
 
@@ -349,10 +428,10 @@ class OOTBService:
 
         return _recurse(root_id, 0)
 
-    def _wr_files(self, wr_id: str):
+    def _wr_files(self, wr_id: str) -> FileSet:
         """Fetch all files and folders recursively for a given Work Request."""
         results = {"inputs": [], "outputs": []}
-        expand = "related_id($select=id,keyed_name,file_size,,modified_on,classification,is_folder,local_file)"
+        expand = "related_id($select=id,keyed_name,file_size,modified_on,classification,is_folder,local_file)"
 
         rel_map = {
             self.mapping.rel_wr_to_input: "inputs",
@@ -369,10 +448,10 @@ class OOTBService:
 
         return FileSet(results["inputs"], results["outputs"])
 
-    def _task_files(self, task_id: str):
+    def _task_files(self, task_id: str) -> FileSet:
         """Fetch all files and folders recursively for a given Task."""
         results = {"inputs": [], "outputs": []}
-        expand = "related_id($select=id,keyed_name,file_size,,modified_on,classification,is_folder,local_file)"
+        expand = "related_id($select=id,keyed_name,file_size,modified_on,classification,is_folder,local_file)"
 
         rel_map = {
             self.mapping.rel_task_to_input: "inputs",
@@ -390,7 +469,10 @@ class OOTBService:
         return FileSet(results["inputs"], results["outputs"])
 
     # ---------------- Download to Server ----------------
+
     def download_to_server_via_cli(self, ans_data_id: str, dest: str) -> str:
+        if not self.cli:
+            raise RuntimeError("CLI client is not available for api_key based configuration")
         ret = self.cli.download(remote=f"ans_Data/{ans_data_id}", local=dest)
         print(f"CLI download result: {ret}")
         return dest
@@ -404,18 +486,16 @@ class OOTBService:
 
 # ---------------- Utility Functions ----------------
 def normalize_options(raw: Any) -> List[OptionSpec]:
-        """
-        Normalize into Dash dropdown options: [{"label": ..., "value": ...}, ...]
-        """
-        if not raw:
-            return []
-        if isinstance(raw, list):
-            if all(isinstance(x, dict) and "label" in x and "value" in x for x in raw):
-                return raw
-            # allow list of primitives
-            out: List[OptionSpec] = []
-            for x in raw:
-                out.append({"label": str(x), "value": x})
-            return out
+    """
+    Normalize into Dash dropdown options: [{"label": ..., "value": ...}, ...]
+    """
+    if not raw:
         return []
-
+    if isinstance(raw, list):
+        if all(isinstance(x, dict) and "label" in x and "value" in x for x in raw):
+            return raw
+        out: List[OptionSpec] = []
+        for x in raw:
+            out.append({"label": str(x), "value": x})
+        return out
+    return []

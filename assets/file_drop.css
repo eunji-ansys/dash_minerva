@@ -1,0 +1,34 @@
+.file-drop-zone {
+  position: relative;
+  min-height: 120px;
+  border-radius: 8px;
+}
+
+.file-drop-zone .file-drop-content {
+  position: relative;
+  z-index: 1;
+}
+
+.file-drop-zone .file-drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.78);
+  border: 2px dashed #0d6efd;
+  border-radius: 8px;
+  backdrop-filter: blur(1px);
+  pointer-events: none;
+}
+
+.file-drop-zone.drag-active .file-drop-overlay {
+  display: flex;
+}
+
+.file-drop-zone.drag-active .file-drop-content {
+  pointer-events: none;
+  user-select: none;
+  opacity: 0.72;
+}

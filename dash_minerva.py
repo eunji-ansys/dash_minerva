@@ -3,6 +3,8 @@ import os
 import uuid
 import shutil
 import json
+import base64
+from datetime import datetime
 from pathlib import Path
 import math
 from typing import Any, List, TypedDict, TypeAlias
@@ -23,6 +25,7 @@ print("### RUNNING DASH FILE:", __file__)
 # --- [0. Load Environment Variables] ---
 load_dotenv()
 TEMP_DOWNLOAD_PATH = os.getenv("TEMP_DOWNLOAD_PATH", "./temp_downloads")
+TEMP_UPLOAD_PATH = os.getenv("TEMP_UPLOAD_PATH", "./temp_uploads")
 
 # --- [1. Build service (tenant-agnostic) ] ---
 service = get_service()
@@ -561,10 +564,73 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
         className="mb-0 table-sm",
     )
 
+def save_uploaded_file(contents: str, filename: str, dest_dir: str) -> str:
+    if not contents or not filename:
+        raise ValueError("Invalid upload payload.")
+
+    os.makedirs(dest_dir, exist_ok=True)
+
+    content_type, content_string = contents.split(",", 1)
+    decoded = base64.b64decode(content_string)
+
+    safe_name = Path(filename).name
+    target_path = os.path.join(dest_dir, safe_name)
+
+    with open(target_path, "wb") as f:
+        f.write(decoded)
+
+    return target_path
+
+
+def render_drop_overlay(category: str):
+    label = "Inputs" if category == "inputs" else "Outputs"
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.I(className="bi bi-cloud-arrow-up fs-3 d-block mb-2"),
+                    html.Div(f"Drop files to upload to {label}", className="fw-semibold"),
+                    html.Div("Release mouse to upload", className="small text-muted"),
+                ],
+                className="text-center",
+            )
+        ],
+        className="file-drop-overlay",
+    )
+
+
+def render_files_tab(file_list, category, active_item, sort_state):
+    return html.Div(
+        [
+            dcc.Upload(
+                id={"type": "file-upload", "index": active_item, "category": category},
+                children=html.Div(
+                    [
+                        html.Div(
+                            create_tree_table(file_list, category, active_item, sort_state),
+                            className="file-drop-content",
+                        ),
+                        render_drop_overlay(category),
+                    ],
+                    className="file-drop-zone position-relative",
+                ),
+                multiple=True,
+                disable_click=True,
+                className="d-block w-100",
+                style={"display": "block"},
+            ),
+            html.Div(
+                id={"type": "file-upload-status", "index": active_item, "category": category},
+                className="small text-muted mt-2",
+            ),
+        ]
+    )
+
 
 # --- [3. App Initialization & Layout] ---
 app = dash.Dash(
     __name__,
+    #requests_pathname_prefix="/AnsysMinerva/custom/dash/",
     external_stylesheets=[dbc.themes.FLATLY, dbc.icons.BOOTSTRAP],
     suppress_callback_exceptions=True,
 )
@@ -577,6 +643,7 @@ app.layout = dbc.Container(
         dcc.Store(id="store-selected", data={"level0": None, "level1": None, "level2": None}),
         dcc.Store(id="store-file-sort", data={"column": "name", "direction": "asc", "index": None}),
         dcc.Store(id="store-file-tab", data={"index": None, "active_tab": "tab-inputs"}),
+        dcc.Store(id="store-file-drag-ui", data={}),
         dbc.Row(
             [
                 dbc.Col(
@@ -1041,14 +1108,14 @@ def update_level2_details(active_item, sort_state, tab_state, component_id, node
             dbc.Tabs(
                 [
                     dbc.Tab(
-                        create_tree_table(inputs, "inputs", current_id, current_sort),
+                        render_files_tab(inputs, "inputs", current_id, current_sort),
                         label=f"Input Files ({len(inputs)})",
                         tab_id="tab-inputs",
                         label_class_name="fw-bold text-primary",
                         className="p-2 border border-top-0 bg-white rounded-bottom",
                     ),
                     dbc.Tab(
-                        create_tree_table(outputs, "outputs", current_id, current_sort),
+                        render_files_tab(outputs, "outputs", current_id, current_sort),
                         label=f"Output Files ({len(outputs)})",
                         tab_id="tab-outputs",
                         label_class_name="fw-bold text-success",
@@ -1064,37 +1131,34 @@ def update_level2_details(active_item, sort_state, tab_state, component_id, node
 
 clientside_callback(
     """
-    function(search_term, content_id) {
-        if (!content_id || typeof content_id.index === 'undefined') {
-            return window.dash_clientside.no_update;
+    function(search_term, input_id, current_class) {
+        if (!input_id || typeof input_id.index === "undefined") {
+            return current_class || "mb-2 shadow-sm";
         }
 
-        const term = search_term ? search_term.toLowerCase().trim() : "";
-        const currentIndex = String(content_id.index);
-
-        const rows = document.getElementsByClassName('file-row-item');
+        const term = (search_term || "").toLowerCase().trim();
+        const currentIndex = String(input_id.index);
+        const rows = document.getElementsByClassName("file-row-item");
 
         for (let i = 0; i < rows.length; i++) {
-            let row = rows[i];
+            const row = rows[i];
 
             if (row.id && row.id.includes(currentIndex)) {
-                const fileName = row.getAttribute('data-filename') || "";
-                if (fileName.includes(term)) {
-                    row.style.display = "";
-                } else {
-                    row.style.display = "none";
-                }
+                const fileName = (row.getAttribute("data-filename") || "").toLowerCase();
+                row.style.display = fileName.includes(term) ? "" : "none";
             }
         }
 
-        return window.dash_clientside.no_update;
+        return current_class || "mb-2 shadow-sm";
     }
     """,
-    Output({"type": "file-search", "index": MATCH}, "id"),
+    Output({"type": "file-search", "index": MATCH}, "className"),
     Input({"type": "file-search", "index": MATCH}, "value"),
-    State({"type": "level2-detail-content", "index": MATCH}, "id"),
+    State({"type": "file-search", "index": MATCH}, "id"),
+    State({"type": "file-search", "index": MATCH}, "className"),
     prevent_initial_call=True,
 )
+
 
 @callback(
     Output("store-file-sort", "data"),
@@ -1261,5 +1325,44 @@ def handle_file_download(n_clicks_list, id_list):
         return dash.no_update, True, f"Transfer failed: {e}", ""
 
 
+@callback(
+    Output({"type": "file-upload-status", "index": MATCH, "category": MATCH}, "children"),
+    Input({"type": "file-upload", "index": MATCH, "category": MATCH}, "contents"),
+    State({"type": "file-upload", "index": MATCH, "category": MATCH}, "filename"),
+    State({"type": "file-upload", "index": MATCH, "category": MATCH}, "id"),
+    prevent_initial_call=True,
+)
+def handle_file_upload(contents_list, filenames, component_id):
+    if not contents_list or not filenames:
+        return dash.no_update
+
+    wr_id = component_id["index"]
+    category = component_id["category"]
+
+    try:
+        request_dir = os.path.join(TEMP_UPLOAD_PATH, str(wr_id), category)
+        saved_files = []
+
+        for contents, filename in zip(contents_list, filenames):
+            saved_path = save_uploaded_file(contents, filename, request_dir)
+            saved_files.append(Path(saved_path).name)
+
+        return html.Div(
+            [
+                html.Div(
+                    f"Uploaded {len(saved_files)} file(s) to {category}.",
+                    className="text-success fw-semibold",
+                ),
+                html.Ul(
+                    [html.Li(name) for name in saved_files],
+                    className="mb-0 mt-1",
+                ),
+            ]
+        )
+
+    except Exception as e:
+        return html.Div(f"Upload failed: {e}", className="text-danger")
+
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host="tokw22min01", debug=True)
