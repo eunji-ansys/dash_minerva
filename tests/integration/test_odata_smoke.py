@@ -1,3 +1,4 @@
+from http import client
 import os
 import sys
 import json
@@ -6,8 +7,10 @@ from dotenv import load_dotenv
 
 # TODO: adjust import path to your project
 # from yourpkg.minerva.odata_client import MinervaODataClient
-from .odata import MinervaODataClient
+from logic.core.minerva.odata import MinervaODataClient
 
+
+# RUN: python -m logic.core.minerva.smoke_test_odata
 
 def env(name: str, default: Optional[str] = None) -> Optional[str]:
     v = os.getenv(name)
@@ -22,6 +25,7 @@ def pretty(obj) -> str:
 
 
 def main() -> int:
+    #sys.path.insert(0, "C:\\Users\\ekwon\\Study\\dash_minerva")
     load_dotenv()
 
     base_url = env("MINERVA_BASE_URL")
@@ -30,6 +34,8 @@ def main() -> int:
     password = env("MINERVA_PASSWORD")
     verify = env("MINERVA_VERIFY", "true").lower() in ("1", "true", "yes", "y")
     timeout = float(env("MINERVA_TIMEOUT", "30"))
+    api_base_path=os.environ.get("MINERVA_API_BASE_PATH", "/server/odata")
+    api_key = os.environ.get("MINERVA_API_KEY")
 
     if not base_url or not username or not password:
         print("Missing env vars. Please set:")
@@ -43,8 +49,8 @@ def main() -> int:
         database=database,
         username=username,
         password=password,
-        verify=verify,
-        timeout=timeout,
+        api_base_path=api_base_path,
+        api_key=api_key,
     )
 
     print("== Minerva OData Smoke Test ==")
@@ -126,9 +132,36 @@ def main() -> int:
         print("  Hint: related path must exist on your server. Try another related name.")
         # not fatal: keep going
 
+    # ------------------------------------------------------------
+    # 5) Get test (small)
+    # ------------------------------------------------------------
+    try:
+        print("[5] GET 'Ans_SimulationTask'")
+        x = client.get("Ans_SimulationTask", 'AA9032FA2E1B4B48913AD46844C0D56C')
+        print("  Item:", pretty(x))
+        print()
+    except Exception as e:
+        print("[5] GET 'Ans_SimulationTask' FAILED:", e)
+        return 1
+
+    # ------------------------------------------------------------
+    # 6) Get test (small)
+    # ------------------------------------------------------------
+    try:
+        print("[6] GET 'Ans_Data'")
+        x = client.get("Ans_Data", '648D946E9AD942D387CBB1324424F9A9')
+        print("  Item:", pretty(x))
+        print()
+    except Exception as e:
+        print("[6] GET 'Ans_Data' FAILED:", e)
+        return 1
+
+
+    # ------------------------------------------------------------
+    # END OF TESTS - add more as needed (e.g., create/update/delete )
+    # ------------------------------------------------------------
     print("✅ Smoke test completed.")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
