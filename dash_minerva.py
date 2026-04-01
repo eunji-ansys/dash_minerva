@@ -180,28 +180,71 @@ def render_badges(
 def badges_for_view(badges: list[Badge], view: str) -> list[Badge]:
     return [b for b in badges or [] if view in (b.views or ())]
 
-def render_copy_button(item_id: str | None, *, size: str = "sm", title: str = "Copy Item ID"):
+def render_copy_button(
+    item_id: str | None,
+    *,
+    title: str = "Copy Item ID",
+):
     if not item_id:
         return None
 
-    return dcc.Clipboard(
-        content=item_id,
+    return html.Button(
+        "⧉",
+        id={"type": "copy-id-btn", "index": item_id},
+        n_clicks=0,
         title=title,
-        children=html.I(className="bi bi-copy"),
+        className="btn btn-sm ms-1 border py-0 px-2 copy-id-btn",
+        **{
+            "data-copy-text": item_id,
+            "data-copy-title": title,
+        },
         style={
-            "cursor": "pointer",
-            "color": "#adb5bd",
-            "fontSize": "13px",
-            "marginLeft": "4px",
+            "fontSize": "14px",
+            "lineHeight": "1",
+            "fontWeight": "600",
+            "color": "#495057",
+            "minWidth": "28px",
+            "height": "24px",
+            "backgroundColor": "white",
         },
     )
 
+def render_external_button(
+    item_id: str | None,
+    *,
+    item_type: str | None = None,
+    title: str = "Open in Minerva",
+):
+    if not item_id or not item_type:
+        return None
+
+    try:
+        href = service.build_item_url(item_id=item_id, item_type=item_type)
+    except Exception as e:
+        print(f"render_external_button failed: {e}")
+        return None
+
+    return dbc.Button(
+        html.Img(
+            src=dash.get_asset_url("icons/arrow-up-right-square.svg"),
+            style={"width": "14px"},
+        ),
+        href=href,
+        target="_blank",
+        external_link=True,
+        color="white",
+        size="sm",
+        className="ms-1 border py-0 px-2",
+        title=title,
+    )
 
 def render_id_row(
     item_id: str | None,
     *,
     label: str = "Item ID",
     className: str = "small mt-2",
+    item_type: str | None = None,
+    show_external_button: bool = False,
 ):
     if not item_id:
         return None
@@ -223,7 +266,12 @@ def render_id_row(
                     "lineHeight": "1.2",
                 },
             ),
-            render_copy_button(item_id, size="sm", title=f"Copy {label}"),
+            render_copy_button(item_id, title=f"Copy {label}"),
+            render_external_button(
+                item_id,
+                item_type=item_type,
+                title=f"Open {label} in Minerva",
+            ) if show_external_button else None,
         ],
         className=f"d-flex align-items-center flex-wrap {className}".strip(),
         style={
@@ -239,12 +287,14 @@ def render_summary_title_block(
     title_style: dict | None = None,
     subtitle_class: str = "text-muted",
     subtitle_style: dict | None = None,
-    badges_class: str = "mt-2",
+    badges_class: str = "ms-3",
     container_class: str = "w-100",
     badge_view: str | None = None,
     copy_id: str | None = None,
     copy_label: str = "Item ID",
     show_copy_id_row: bool = False,
+    copy_item_type: str | None = None,
+    show_external_button: bool = False,
 ):
     title_style = {**(title_style or {}), "userSelect": "text"}
     subtitle_style = {**(subtitle_style or {}), "userSelect": "text"}
@@ -255,7 +305,7 @@ def render_summary_title_block(
         else (summary.badges or [])
     )
 
-    return html.Div(
+    title_row = html.Div(
         [
             html.Div(
                 summary.title or "Item",
@@ -263,20 +313,32 @@ def render_summary_title_block(
                 style=title_style,
             ),
             html.Div(
+                render_badges(visible_badges),
+                className=badges_class,
+            ) if visible_badges else None,
+        ],
+        className="d-flex justify-content-between align-items-start flex-wrap",
+    )
+
+    return html.Div(
+        [
+            title_row,
+            html.Div(
                 summary.subtitle,
                 className=subtitle_class,
                 style=subtitle_style,
             ) if summary.subtitle else None,
-            render_id_row(copy_id, label=copy_label) if show_copy_id_row and copy_id else None,
-            render_badges(
-                visible_badges,
-                className=badges_class,
-            ) if visible_badges else None,
+            render_id_row(
+                copy_id,
+                label=copy_label,
+                item_type=copy_item_type,
+                show_external_button=show_external_button,
+            ) if show_copy_id_row and copy_id else None,
         ],
         className=container_class,
     )
 
-def render_header_from_details(details: DetailsData, item_id: str | None = None):
+def render_header_from_details(details: DetailsData, item_id: str | None = None, item_type: str | None = None):
     return html.Div(
         [
             render_summary_title_block(
@@ -297,6 +359,8 @@ def render_header_from_details(details: DetailsData, item_id: str | None = None)
                 copy_id=item_id,
                 copy_label="Item ID",
                 show_copy_id_row=True,
+                copy_item_type=item_type,
+                show_external_button=True,
             )
         ],
         className="bg-white p-3 rounded shadow-sm border-start border-primary border-4 mb-2",
@@ -487,19 +551,15 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
                                     className="ms-1 border py-0 px-2",
                                 ),
                                 dbc.Button(
-                                    [
-                                        html.Img(
-                                            src=dash.get_asset_url("icons/arrow-up-right-square.svg"),
-                                            style={"width": "12px", "marginRight": "4px"},
-                                        ),
-                                        "Minerva",
-                                    ],
+                                    html.Img(
+                                        src=dash.get_asset_url("icons/arrow-up-right-square.svg"),
+                                        style={"width": "14px"},
+                                    ),
                                     id={"type": "btn-external", "index": file_id, "file_name": file_name, "category": category},
-                                    color="primary",
-                                    outline=True,
+                                    color="white",
                                     size="sm",
-                                    className="ms-1 py-0 px-2 d-flex align-items-center justify-content-center",
-                                    style={"fontSize": "12px"},
+                                    className="ms-1 border py-0 px-2",
+                                    title="Open in Minerva",
                                 ),
                             ],
                             size="sm",
@@ -728,6 +788,7 @@ app.layout = dbc.Container(
 )
 
 # --- [4. Callback Logic] ---
+
 def build_filter_components(filter_spec: FilterSpec) -> list:
     children = []
 
@@ -848,12 +909,43 @@ def highlight_selected_level0(selected, item_ids):
     ]
 
 
+LEVEL1_CARD_MAX = 6
+
 def render_level1_section(level1_nodes: list[NodeRef]):
-    columns = [
-        dbc.Col(render_level1_card(n), xs=12, sm=6, md=4, lg=4, className="d-flex align-items-stretch")
-        for n in level1_nodes
-    ]
-    return html.Div([dbc.Row(columns, className="g-3")], style={"maxHeight": "70vh", "overflowY": "auto", "padding": "10px"})
+    is_list = len(level1_nodes) > LEVEL1_CARD_MAX
+
+    container_style = {
+        "overflowY": "auto",
+        "padding": "10px",
+        "maxHeight": "45vh" if is_list else "70vh",
+    }
+
+    if not is_list:
+        columns = [
+            dbc.Col(
+                render_level1_card(n),
+                xs=12, sm=6, md=4, lg=4,
+                className="d-flex align-items-stretch",
+            )
+            for n in level1_nodes
+        ]
+        return html.Div(
+            [dbc.Row(columns, className="g-3")],
+            style=container_style,
+        )
+
+    items = [render_level1_list_item(n) for n in level1_nodes]
+
+    return html.Div(
+        [
+            html.Div(
+                f"Showing {len(level1_nodes)} items in list view.",
+                className="text-muted small px-2 pt-2 pb-1",
+            ),
+            dbc.ListGroup(items, flush=True),
+        ],
+        style=container_style,
+    )
 
 def render_level1_card(node: NodeRef):
     card_body = dbc.CardBody(
@@ -876,7 +968,9 @@ def render_level1_card(node: NodeRef):
             render_id_row(
                 node.id,
                 label="SR ID",
-                className="small mb-2"
+                className="small mb-2",
+                item_type=node.item_type,
+                show_external_button=True,
             ),
 
             render_badges(
@@ -897,6 +991,60 @@ def render_level1_card(node: NodeRef):
         style={"cursor": "pointer", "width": "100%"},
     )
 
+def render_level1_list_item(node: NodeRef):
+    badges = badges_for_view(node.summary.badges or [], "card")
+
+    return dbc.ListGroupItem(
+        [
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div(
+                                node.summary.title or "Item",
+                                className="fw-semibold",
+                                style={
+                                    "fontSize": "15px",
+                                    "lineHeight": "1.25",
+                                    "userSelect": "text",
+                                },
+                            ),
+                            html.Div(
+                                node.summary.subtitle,
+                                className="text-muted mt-1",
+                                style={
+                                    "fontSize": "13px",
+                                    "lineHeight": "1.2",
+                                    "userSelect": "text",
+                                },
+                            ) if node.summary.subtitle else None,
+                        ],
+                        className="min-w-0 flex-grow-1",
+                    ),
+                    html.Div(
+                        render_id_row(
+                            node.id,
+                            label="SR ID",
+                            className="small text-nowrap ms-md-3 mt-2 mt-md-0",
+                            item_type=node.item_type,
+                            show_external_button=True,
+                        ),
+                        className="flex-shrink-0",
+                    ),
+                ],
+                className="d-flex flex-column flex-md-row align-items-md-start justify-content-between gap-2",
+            ),
+            render_badges(
+                badges,
+                className="mt-2",
+            ) if badges else None,
+        ],
+        id={"type": "level1-card", "index": node.id},
+        n_clicks=0,
+        action=True,
+        className="border-0 border-bottom py-3 shadow-sm",
+        style={"cursor": "pointer"},
+    )
 
 @callback(
     [
@@ -935,7 +1083,11 @@ def update_level0_view(n_clicks, node_map, selected):
     level1_nodes = service.get_children(level0_node).children
     node_map = merge_node_map(node_map, level1_nodes)
 
-    header = render_header_from_details(level0_details, item_id=level0_id)
+    header = render_header_from_details(
+        level0_details,
+        item_id=level0_id,
+        item_type=level0_node.item_type,
+    )
 
     if not level1_nodes:
         level1_cards = render_placeholder(f"No {level1_title} found.")
@@ -979,8 +1131,11 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
     level1_id = ctx.triggered_id["index"]
 
     classnames = [
-        "h-100 shadow border border-3 border-primary bg-primary bg-opacity-10" if sid["index"] == level1_id
-        else "h-100 shadow-sm border-0"
+        (
+            "shadow border border-3 border-primary bg-primary bg-opacity-10"
+            if sid["index"] == level1_id
+            else "shadow-sm border-0"
+        )
         for sid in level1_ids
     ]
 
@@ -1092,7 +1247,13 @@ def update_level2_details(active_item, sort_state, tab_state, component_id, node
 
     return html.Div(
         [
-            render_id_row(current_id, label="WR ID", className="small px-2 pt-2 mb-2"),
+            render_id_row(
+                current_id,
+                label="WR ID",
+                className="small px-2 pt-2 mb-2",
+                item_type=node.item_type,
+                show_external_button=True,
+            ),
             html.Div(
                 [
                     dbc.Input(

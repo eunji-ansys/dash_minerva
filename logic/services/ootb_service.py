@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Optional, List, Sequence
+from urllib.parse import quote
 
 from datamodel.models import (
     FilterSpec,
@@ -213,6 +214,7 @@ class OOTBService:
         **_: Any,
     ):
         self.mapping = mapping or TenantMapping()
+        self.base_url=base_url
 
         # OData client supports both:
         # - api_key based new web service
@@ -259,6 +261,20 @@ class OOTBService:
 
     def get_filter_spec(self) -> FilterSpec:
         return {}
+
+    def get_minerva_base_url(self) -> str:
+        return self.base_url
+
+    def build_item_url(self, item_id: str, item_type: str | None = None) -> str:
+        if not item_id:
+            raise ValueError("item_id is required")
+        if not item_type:
+            raise ValueError("item_type is required")
+
+        base_url = self.get_minerva_base_url().rstrip("/")
+        start_item = quote(f"{item_type}:{item_id}", safe="")
+
+        return f"{base_url}/?StartItem={start_item}"
 
     # ---------------- UI Contract ----------------
 
