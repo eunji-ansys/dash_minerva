@@ -227,7 +227,6 @@ class MinervaCLIClient:
             raise ValueError(f"{self._pfx}Unknown auth mode: {auth.mode!r}")
 
     def _build_auth_env(self, auth: CLIAuthOptions) -> Dict[str, str]:
-        """Build authentication-related environment variables (secrets)."""
         env: Dict[str, str] = {}
         if auth.mode == "Explicit":
             env["ANS_MINERVA_AUTH__PASSWORD"] = auth.password  # type: ignore[assignment]
@@ -236,7 +235,6 @@ class MinervaCLIClient:
         return env
 
     def _build_auth_args(self, auth: CLIAuthOptions) -> List[str]:
-        """Build authentication-related CLI flags (non-secrets)."""
         args: List[str] = ["--auth:database", self.database]
         if auth.username:
             args += ["--auth:user", auth.username]

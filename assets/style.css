@@ -85,3 +85,7 @@
     border-radius: 0 4px 4px 0;
     background-color: #3b82f6;
 }
+
+.viewer-image:hover {
+    transform: scale(1.05);
+}

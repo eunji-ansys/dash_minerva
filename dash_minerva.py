@@ -3,10 +3,14 @@ import os
 import uuid
 import shutil
 import json
+import base64
+from datetime import datetime
 from pathlib import Path
 import math
 from typing import Any, List, TypedDict, TypeAlias
 from dotenv import load_dotenv
+import time
+import threading
 
 import dash
 from dash import dcc, html, Input, Output, State, callback, clientside_callback, ALL, MATCH, ctx
@@ -14,6 +18,12 @@ import dash_bootstrap_components as dbc
 import glob
 from urllib.parse import quote
 from flask import logging, request, send_file, abort
+import mimetypes
+import pandas as pd
+import zipfile
+import tempfile
+import xml.etree.ElementTree as ET
+from openpyxl import load_workbook
 
 from logic.services.service_factory import get_service
 from datamodel.models import FilterFieldSpec, Filters, FilterSpec, NodeRef, NodeKind, DetailsData, FileNode, FileSet, Summary, Badge
@@ -23,6 +33,8 @@ print("### RUNNING DASH FILE:", __file__)
 # --- [0. Load Environment Variables] ---
 load_dotenv()
 TEMP_DOWNLOAD_PATH = os.getenv("TEMP_DOWNLOAD_PATH", "./temp_downloads")
+TEMP_UPLOAD_PATH = os.getenv("TEMP_UPLOAD_PATH", "./temp_uploads")
+TEMP_VIEWER_PATH = os.getenv("TEMP_VIEWER_PATH", "./temp_viewer")
 
 # --- [1. Build service (tenant-agnostic) ] ---
 service = get_service()
@@ -33,13 +45,23 @@ print("### Service initialized:", service)
 FIXED_VIEWER_CONFIG = {
     ".pdf": "PDF_VIEWER",
     ".txt": "TEXT_VIEWER",
+    ".log": "TEXT_VIEWER",
+    ".xml": "TEXT_VIEWER",
     ".csv": "TABLE_VIEWER",
     ".xlsx": "TABLE_VIEWER",
+    ".png": "IMAGE_VIEWER",
+    ".jpg": "IMAGE_VIEWER",
+    ".jpeg": "IMAGE_VIEWER",
+    ".gif": "IMAGE_VIEWER",
+    ".bmp": "IMAGE_VIEWER",
+    ".svg": "IMAGE_VIEWER",
+    ".webp": "IMAGE_VIEWER",
 }
 PATTERN_VIEWER_CONFIG = [
     (r"\.s\d+p", "TOUCHSTONE_VIEWER"),
-    (r"\.v\d+", "VERSION_VIEWER")
 ]
+
+VIEWER_FILE_REGISTRY: dict[str, str] = {}
 
 def get_viewer_type_by_ext(file_name: str | None):
     if not file_name:
@@ -177,6 +199,106 @@ def render_badges(
 def badges_for_view(badges: list[Badge], view: str) -> list[Badge]:
     return [b for b in badges or [] if view in (b.views or ())]
 
+def render_copy_button(
+    item_id: str | None,
+    *,
+    title: str = "Copy Item ID",
+):
+    if not item_id:
+        return None
+
+    return html.Button(
+        "⧉",
+        id={"type": "copy-id-btn", "index": item_id},
+        n_clicks=0,
+        title=title,
+        className="btn btn-sm ms-1 border py-0 px-2 copy-id-btn",
+        **{
+            "data-copy-text": item_id,
+            "data-copy-title": title,
+        },
+        style={
+            "fontSize": "14px",
+            "lineHeight": "1",
+            "fontWeight": "600",
+            "color": "#495057",
+            "minWidth": "28px",
+            "height": "24px",
+            "backgroundColor": "white",
+        },
+    )
+
+def render_external_button(
+    item_id: str | None,
+    *,
+    item_type: str | None = None,
+    title: str = "Open in Minerva",
+):
+    if not item_id or not item_type:
+        return None
+
+    try:
+        href = service.build_item_url(item_id=item_id, item_type=item_type)
+    except Exception as e:
+        print(f"render_external_button failed: {e}")
+        return None
+
+    return dbc.Button(
+        html.Img(
+            src=dash.get_asset_url("icons/arrow-up-right-square.svg"),
+            style={"width": "14px"},
+        ),
+        href=href,
+        target="_blank",
+        external_link=True,
+        color="white",
+        size="sm",
+        className="ms-1 border py-0 px-2",
+        title=title,
+    )
+
+def render_id_row(
+    item_id: str | None,
+    *,
+    label: str = "Item ID",
+    className: str = "small mt-2",
+    item_type: str | None = None,
+    show_external_button: bool = False,
+):
+    if not item_id:
+        return None
+
+    return html.Div(
+        [
+            html.Code(
+                item_id,
+                style={
+                    "fontSize": "10px",
+                    "fontFamily": "Consolas, Monaco, monospace",
+                    "color": "#6c757d",
+                    "backgroundColor": "#f8f9fa",
+                    "border": "1px solid #e9ecef",
+                    "borderRadius": "5px",
+                    "padding": "2px 6px",
+                    "userSelect": "text",
+                    "wordBreak": "break-all",
+                    "lineHeight": "1.2",
+                },
+            ),
+            render_copy_button(item_id, title=f"Copy {label}"),
+            render_external_button(
+                item_id,
+                item_type=item_type,
+                title=f"Open {label} in Minerva",
+            ) if show_external_button else None,
+        ],
+        className=f"d-flex align-items-center flex-wrap {className}".strip(),
+        style={
+            "columnGap": "6px",
+            "rowGap": "4px",
+        },
+    )
+
 def render_summary_title_block(
     summary: Summary,
     *,
@@ -184,12 +306,17 @@ def render_summary_title_block(
     title_style: dict | None = None,
     subtitle_class: str = "text-muted",
     subtitle_style: dict | None = None,
-    badges_class: str = "mt-2",
+    badges_class: str = "ms-3",
     container_class: str = "w-100",
     badge_view: str | None = None,
+    copy_id: str | None = None,
+    copy_label: str = "Item ID",
+    show_copy_id_row: bool = False,
+    copy_item_type: str | None = None,
+    show_external_button: bool = False,
 ):
-    title_style = title_style or {}
-    subtitle_style = subtitle_style or {}
+    title_style = {**(title_style or {}), "userSelect": "text"}
+    subtitle_style = {**(subtitle_style or {}), "userSelect": "text"}
 
     visible_badges = (
         badges_for_view(summary.badges or [], badge_view)
@@ -197,7 +324,7 @@ def render_summary_title_block(
         else (summary.badges or [])
     )
 
-    return html.Div(
+    title_row = html.Div(
         [
             html.Div(
                 summary.title or "Item",
@@ -205,42 +332,146 @@ def render_summary_title_block(
                 style=title_style,
             ),
             html.Div(
+                render_badges(visible_badges),
+                className=badges_class,
+            ) if visible_badges else None,
+        ],
+        className="d-flex justify-content-between align-items-start flex-wrap",
+    )
+
+    return html.Div(
+        [
+            title_row,
+            html.Div(
                 summary.subtitle,
                 className=subtitle_class,
                 style=subtitle_style,
             ) if summary.subtitle else None,
-            render_badges(
-                visible_badges,
-                className=badges_class,
-            ) if visible_badges else None,
+            render_id_row(
+                copy_id,
+                label=copy_label,
+                item_type=copy_item_type,
+                show_external_button=show_external_button,
+            ) if show_copy_id_row and copy_id else None,
         ],
         className=container_class,
     )
 
-def render_header_from_details(details: DetailsData):
+def render_header_from_details(details: DetailsData, item_id: str | None = None, item_type: str | None = None):
     return html.Div(
         [
             render_summary_title_block(
                 details.summary,
                 title_class="fw-bold mb-0",
                 title_style={
-                    "fontSize": "1.75rem",
-                    "lineHeight": "1.2",
+                    "fontSize": "1.5rem",
+                    "lineHeight": "1.15",
                 },
-                subtitle_class="text-muted",
+                subtitle_class="text-muted mb-0",
                 subtitle_style={
-                    "fontSize": "1rem",
-                    "marginTop": "4px",
+                    "fontSize": "0.95rem",
+                    "marginTop": "2px",
                 },
-                badges_class="mt-3",
+                badges_class="mt-2",
                 container_class="w-100",
-                 badge_view="header",
+                badge_view="header",
+                copy_id=item_id,
+                copy_label="Item ID",
+                show_copy_id_row=True,
+                copy_item_type=item_type,
+                show_external_button=True,
             )
         ],
         className="bg-white p-3 rounded shadow-sm border-start border-primary border-4 mb-2",
+        style={"userSelect": "text"},
     )
 
 # ---- File UI helpers ----
+def sort_file_list(file_list: list[FileNode], sort_state: dict | None) -> list[FileNode]:
+    if not file_list:
+        return file_list
+
+    sort_state = sort_state or {"column": "name", "direction": "asc"}
+    column = sort_state.get("column", "name")
+    direction = sort_state.get("direction", "asc")
+    reverse = direction == "desc"
+
+    def safe_str(value):
+        return (value or "").lower()
+
+    def safe_num(value):
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def safe_modified(value):
+        return value or ""
+
+    def sort_key(node: FileNode):
+        if column == "name":
+            return safe_str(getattr(node, "name", None))
+        if column == "size":
+            return safe_num(getattr(node, "size", None))
+        if column == "modified":
+            return safe_modified(getattr(node, "modified_on", None))
+        return safe_str(getattr(node, "name", None))
+
+    class TreeItem:
+        def __init__(self, node: FileNode):
+            self.node = node
+            self.children: list["TreeItem"] = []
+
+    roots: list[TreeItem] = []
+    stack: list[TreeItem] = []
+
+    for node in file_list:
+        depth = getattr(node, "depth", 0) or 0
+        item = TreeItem(node)
+
+        while len(stack) > depth:
+            stack.pop()
+
+        if depth == 0 or not stack:
+            roots.append(item)
+        else:
+            stack[-1].children.append(item)
+
+        stack.append(item)
+
+    def sort_tree(items: list[TreeItem]):
+        items.sort(key=lambda x: sort_key(x.node), reverse=reverse)
+        for item in items:
+            if item.children:
+                sort_tree(item.children)
+
+    sort_tree(roots)
+
+    flattened: list[FileNode] = []
+
+    def flatten(items: list[TreeItem], depth: int = 0):
+        for item in items:
+            node = item.node
+            try:
+                node.depth = depth
+            except Exception:
+                pass
+            flattened.append(node)
+            flatten(item.children, depth + 1)
+
+    flatten(roots)
+    return flattened
+
+
+def render_sort_icon(sort_state: dict | None, column: str):
+    if not sort_state or sort_state.get("column") != column:
+        return html.I(className="bi bi-arrow-down-up ms-1 text-muted", style={"fontSize": "12px"})
+
+    if sort_state.get("direction") == "asc":
+        return html.I(className="bi bi-arrow-up ms-1", style={"fontSize": "12px"})
+
+    return html.I(className="bi bi-arrow-down ms-1", style={"fontSize": "12px"})
+
 def format_size(size_bytes):
     if size_bytes is None or size_bytes == 0:
         return "0 B"
@@ -255,19 +486,37 @@ def format_size(size_bytes):
     s = round(size_bytes / p, 2)
     return f"{s} {size_name[i]}"
 
+def format_datetime(dt):
+    if not dt:
+        return "-"
 
-def create_tree_table(file_list: list[FileNode], category: str, active_item: str):
+    if isinstance(dt, str):
+        return dt.replace("T", " ")[:16]
+
+    return str(dt)
+
+
+def create_tree_table(file_list: list[FileNode], category: str, active_item: str, sort_state: dict | None):
     if not file_list:
         return html.Div("No files found.", className="p-4 text-muted small text-center")
 
+    sorted_files = sort_file_list(file_list, sort_state)
+
     rows = []
-    for f in file_list:
+    for f in sorted_files:
         file_id = f.id
         file_name = f.name
         is_folder = f.is_folder
         vault_id = f.vault_id
         depth = f.depth or 0
         file_size = f.size or 0
+        modified_on = getattr(f, "modified_on", None)
+
+        external_href = None
+        try:
+            external_href = service.build_file_item_url(item_id=file_id)
+        except Exception as e:
+            print(f"file external url build failed: {e}")
 
         rows.append(
             html.Tr(
@@ -291,6 +540,11 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
                         className="align-middle",
                     ),
                     html.Td(
+                        format_datetime(modified_on),
+                        className="text-muted align-middle",
+                        style={"fontSize": "13px", "paddingTop": "4px", "paddingBottom": "4px", "whiteSpace": "nowrap"},
+                    ),
+                    html.Td(
                         format_size(file_size) if not is_folder else "-",
                         className="text-end text-muted align-middle",
                         style={"fontSize": "14px", "paddingTop": "4px", "paddingBottom": "4px"},
@@ -300,7 +554,14 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
                             [
                                 dbc.Button(
                                     html.Img(src=dash.get_asset_url("icons/eye.svg"), style={"width": "14px"}),
-                                    id={"type": "btn-view", "index": file_id, "file_name": file_name, "category": category},
+                                    id={
+                                        "type": "btn-view",
+                                        "index": file_id,
+                                        "file_name": file_name,
+                                        "category": category,
+                                        "vault_id": vault_id,
+                                        "is_folder": is_folder,
+                                    },
                                     color="white",
                                     size="sm",
                                     className="border py-0 px-2",
@@ -315,26 +576,25 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
                                         src=dash.get_asset_url("icons/folder-download.svg" if is_folder else "icons/download.svg"),
                                         style={"width": "14px"},
                                     ),
-                                    id={"type": "btn-download", "index": file_id, "file_name": file_name, "category": category, "is_folder": is_folder, "vault_id":vault_id},
+                                    id={"type": "btn-download", "index": file_id, "file_name": file_name, "category": category, "is_folder": is_folder, "vault_id": vault_id},
                                     n_clicks=0,
                                     color="white",
                                     size="sm",
                                     className="ms-1 border py-0 px-2",
                                 ),
                                 dbc.Button(
-                                    [
-                                        html.Img(
-                                            src=dash.get_asset_url("icons/arrow-up-right-square.svg"),
-                                            style={"width": "12px", "marginRight": "4px"},
-                                        ),
-                                        "Minerva",
-                                    ],
-                                    id={"type": "btn-external", "index": file_id, "file_name": file_name, "category": category},
-                                    color="primary",
-                                    outline=True,
+                                    html.Img(
+                                        src=dash.get_asset_url("icons/arrow-up-right-square.svg"),
+                                        style={"width": "14px"},
+                                    ),
+                                    href=external_href,
+                                    target="_blank",
+                                    external_link=True,
+                                    color="white",
                                     size="sm",
-                                    className="ms-1 py-0 px-2 d-flex align-items-center justify-content-center",
-                                    style={"fontSize": "12px"},
+                                    className="ms-1 border py-0 px-2",
+                                    title="Open in Minerva",
+                                    disabled=not external_href,
                                 ),
                             ],
                             size="sm",
@@ -356,8 +616,37 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
             html.Thead(
                 html.Tr(
                     [
-                        html.Th("Name", className="ps-4"),
-                        html.Th("Size", className="text-end", style={"width": "100px"}),
+                        html.Th(
+                            html.Button(
+                                ["Name", render_sort_icon(sort_state, "name")],
+                                id={"type": "file-sort", "column": "name", "index": active_item},
+                                n_clicks=0,
+                                className="btn btn-link p-0 text-decoration-none fw-bold text-dark",
+                                style={"fontSize": "inherit"},
+                            ),
+                            className="ps-4",
+                        ),
+                        html.Th(
+                            html.Button(
+                                ["Modified", render_sort_icon(sort_state, "modified")],
+                                id={"type": "file-sort", "column": "modified", "index": active_item},
+                                n_clicks=0,
+                                className="btn btn-link p-0 text-decoration-none fw-bold text-dark",
+                                style={"fontSize": "inherit"},
+                            ),
+                            style={"width": "160px"},
+                        ),
+                        html.Th(
+                            html.Button(
+                                ["Size", render_sort_icon(sort_state, "size")],
+                                id={"type": "file-sort", "column": "size", "index": active_item},
+                                n_clicks=0,
+                                className="btn btn-link p-0 text-decoration-none fw-bold text-dark",
+                                style={"fontSize": "inherit"},
+                            ),
+                            className="text-end",
+                            style={"width": "100px"},
+                        ),
                         html.Th("Actions", className="text-center", style={"width": "180px"}),
                     ],
                     style={"lineHeight": "1.2"},
@@ -370,20 +659,356 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
         className="mb-0 table-sm",
     )
 
+def save_uploaded_file(contents: str, filename: str, dest_dir: str) -> str:
+    if not contents or not filename:
+        raise ValueError("Invalid upload payload.")
+
+    os.makedirs(dest_dir, exist_ok=True)
+
+    content_type, content_string = contents.split(",", 1)
+    decoded = base64.b64decode(content_string)
+
+    safe_name = Path(filename).name
+    target_path = os.path.join(dest_dir, safe_name)
+
+    with open(target_path, "wb") as f:
+        f.write(decoded)
+
+    return target_path
+
+
+def render_drop_overlay(category: str):
+    label = "Inputs" if category == "inputs" else "Outputs"
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.I(className="bi bi-cloud-arrow-up fs-3 d-block mb-2"),
+                    html.Div(f"Drop files to upload to {label}", className="fw-semibold"),
+                    html.Div("Release mouse to upload", className="small text-muted"),
+                ],
+                className="text-center",
+            )
+        ],
+        className="file-drop-overlay",
+    )
+
+
+def render_files_tab(file_list, category, active_item, sort_state):
+    return html.Div(
+        [
+            dcc.Upload(
+                id={"type": "file-upload", "index": active_item, "category": category},
+                children=html.Div(
+                    [
+                        html.Div(
+                            create_tree_table(file_list, category, active_item, sort_state),
+                            className="file-drop-content",
+                        ),
+                        render_drop_overlay(category),
+                    ],
+                    className="file-drop-zone position-relative",
+                ),
+                multiple=True,
+                disable_click=True,
+                className="d-block w-100",
+                style={"display": "block"},
+            ),
+            html.Div(
+                id={"type": "file-upload-status", "index": active_item, "category": category},
+                className="small text-muted mt-2",
+            ),
+        ]
+    )
+
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
+
+
+def touch_dir(path: str):
+    try:
+        os.makedirs(path, exist_ok=True)
+        now = time.time()
+        os.utime(path, (now, now))
+    except Exception as e:
+        print(f"[TEMP TOUCH ERROR] {path}: {e}")
+
+def cleanup_temp_dirs(base_path: str, ttl_seconds: int):
+    now = time.time()
+    if not base_path or not os.path.exists(base_path):
+        return
+
+    for name in os.listdir(base_path):
+        path = os.path.join(base_path, name)
+        try:
+            if not os.path.isdir(path):
+                continue
+            age = now - os.path.getmtime(path)
+            if age > ttl_seconds:
+                shutil.rmtree(path, ignore_errors=False)
+                print(f"[TEMP CLEANUP] Removed expired temp dir: {path}")
+        except FileNotFoundError:
+            continue
+        except PermissionError as e:
+            print(f"[TEMP CLEANUP SKIP] In use or locked: {path} ({e})")
+        except Exception as e:
+            print(f"[TEMP CLEANUP ERROR] {path}: {e}")
+
+def run_startup_cleanup():
+    cleanup_temp_dirs(TEMP_VIEWER_PATH, ttl_seconds=2 * 60 * 60)
+    cleanup_temp_dirs(TEMP_DOWNLOAD_PATH, ttl_seconds=2 * 60 * 60)
+    cleanup_temp_dirs(TEMP_UPLOAD_PATH, ttl_seconds=24 * 60 * 60)
+
+def start_temp_cleanup_scheduler():
+    def _loop():
+        while True:
+            try:
+                cleanup_temp_dirs(TEMP_VIEWER_PATH, ttl_seconds=2 * 60 * 60)
+                cleanup_temp_dirs(TEMP_DOWNLOAD_PATH, ttl_seconds=2 * 60 * 60)
+                cleanup_temp_dirs(TEMP_UPLOAD_PATH, ttl_seconds=24 * 60 * 60)
+            except Exception as e:
+                print(f"[TEMP CLEANUP LOOP ERROR] {e}")
+            time.sleep(10 * 60)
+
+    t = threading.Thread(target=_loop, daemon=True, name="temp-cleanup-thread")
+    t.start()
+    return t
+
+def register_viewer_file(file_path: str) -> str:
+    token = uuid.uuid4().hex
+    VIEWER_FILE_REGISTRY[token] = file_path
+    return token
+
+
+def build_viewer_url(token: str) -> str:
+    return app.get_relative_path(f"/dash/viewer/{token}")
+
+
+def sanitize_xlsx_for_preview(file_path: str) -> str:
+    """
+    Create a sanitized copy of an xlsx file for preview purposes.
+    Removes workbook definedNames such as Print_Titles / Print_Area,
+    which can break openpyxl on some generated workbooks.
+    Returns the path to the sanitized temp file.
+    """
+    temp_dir = tempfile.mkdtemp(prefix="xlsx_preview_")
+    sanitized_path = os.path.join(temp_dir, Path(file_path).name)
+
+    with zipfile.ZipFile(file_path, "r") as zin:
+        with zipfile.ZipFile(sanitized_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+
+                if item.filename == "xl/workbook.xml":
+                    try:
+                        root = ET.fromstring(data)
+                        ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+                        defined_names = root.find("main:definedNames", ns)
+                        if defined_names is not None:
+                            root.remove(defined_names)
+
+                        data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+                    except Exception:
+                        # If sanitizing fails, keep original workbook.xml
+                        pass
+
+                zout.writestr(item, data)
+
+    return sanitized_path
+
+def build_table_preview(file_path: str, max_rows: int = 200):
+    ext = Path(file_path).suffix.lower()
+
+    try:
+        if ext == ".csv":
+            df = pd.read_csv(file_path, nrows=max_rows)
+
+        elif ext == ".xlsx":
+            preview_path = sanitize_xlsx_for_preview(file_path)
+
+            wb = load_workbook(preview_path, data_only=True, read_only=True)
+            ws = wb[wb.sheetnames[0]]
+
+            rows = list(ws.iter_rows(values_only=True, max_row=max_rows + 1))
+            if not rows:
+                return html.Div("Empty worksheet.", className="text-muted")
+
+            header = rows[0]
+            data_rows = rows[1:]
+
+            normalized_header = []
+            for i, col in enumerate(header):
+                normalized_header.append(str(col).strip() if col not in (None, "") else f"Column {i+1}")
+
+            df = pd.DataFrame(data_rows, columns=normalized_header)
+
+        else:
+            return html.Div("Unsupported table format.", className="text-muted")
+
+        return html.Div(
+            [
+                html.Div(
+                    f"Previewing first {min(len(df), max_rows)} row(s)",
+                    className="text-muted small mb-2",
+                ),
+                dbc.Table.from_dataframe(
+                    df,
+                    striped=True,
+                    bordered=True,
+                    hover=True,
+                    size="sm",
+                    responsive=True,
+                    className="mb-0",
+                ),
+            ],
+            style={"maxHeight": "70vh", "overflow": "auto"},
+        )
+
+    except Exception as e:
+        return html.Div(
+            [
+                html.Div("Preview not available for this Excel file.", className="fw-semibold"),
+                html.Div("This file contains unsupported Excel metadata.", className="text-muted small"),
+                html.Div("Please download and open in Excel.", className="text-muted small mt-2"),
+            ],
+            className="p-3",
+        )
+
+
+def build_text_preview(file_path: str, max_chars: int = 200000):
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(max_chars)
+
+        return html.Pre(
+            content,
+            style={
+                "maxHeight": "70vh",
+                "overflow": "auto",
+                "whiteSpace": "pre-wrap",
+                "wordBreak": "break-word",
+                "fontSize": "13px",
+                "marginBottom": "0",
+                "backgroundColor": "#f8f9fa",
+                "padding": "12px",
+                "border": "1px solid #dee2e6",
+                "borderRadius": "8px",
+            },
+        )
+    except Exception as e:
+        return html.Div(f"Failed to load text preview: {e}", className="text-danger")
+
+
+def build_generic_iframe(token: str):
+    return html.Iframe(
+        src=build_viewer_url(token),
+        style={
+            "width": "100%",
+            "height": "75vh",
+            "border": "0",
+            "borderRadius": "8px",
+            "backgroundColor": "white",
+        },
+    )
+
+
+def build_viewer_content(file_path: str, file_name: str):
+    viewer_type = get_viewer_type_by_ext(file_name)
+    ext = Path(file_name).suffix.lower()
+
+    if viewer_type == "PDF_VIEWER":
+        token = register_viewer_file(file_path)
+        return build_generic_iframe(token)
+
+    if viewer_type == "TEXT_VIEWER":
+        return build_text_preview(file_path)
+
+    if viewer_type == "TABLE_VIEWER":
+        return build_table_preview(file_path)
+
+    if viewer_type == "TOUCHSTONE_VIEWER":
+        return html.Div(
+            [
+                html.Div("Touchstone preview is not implemented yet.", className="fw-semibold mb-2"),
+                html.Div(file_name, className="text-muted small"),
+                build_text_preview(file_path, max_chars=50000),
+            ]
+        )
+
+    if viewer_type == "IMAGE_VIEWER":
+        token = register_viewer_file(file_path)
+
+        return html.Div(
+            [
+                html.Div(
+                    [
+                        html.Img(
+                            id="viewer-image",
+                            src=build_viewer_url(token),
+                            className="viewer-image",
+                            draggable="false",
+                        )
+                    ],
+                    id="viewer-image-stage",
+                    className="viewer-image-stage",
+                    **{"data-scale": "1"},
+                )
+            ],
+            className="viewer-image-shell",
+        )
+
+    mime_type, _ = mimetypes.guess_type(file_path)
+    if mime_type and (mime_type.startswith("image/") or mime_type in ("application/pdf", "text/plain")):
+        token = register_viewer_file(file_path)
+        return build_generic_iframe(token)
+
+    return html.Div(
+        [
+            html.Div("This file type does not support inline preview.", className="fw-semibold"),
+            html.Div(file_name, className="text-muted small mt-1"),
+        ],
+        className="p-3",
+    )
 
 # --- [3. App Initialization & Layout] ---
 app = dash.Dash(
     __name__,
+    #requests_pathname_prefix="/AnsysMinerva/custom/dash/",
     external_stylesheets=[dbc.themes.FLATLY, dbc.icons.BOOTSTRAP],
     suppress_callback_exceptions=True,
 )
 
+server = app.server
 
+@server.route("/dash/viewer/<token>")
+def serve_viewer_file(token):
+    file_path = VIEWER_FILE_REGISTRY.get(token)
+
+    if not file_path or not os.path.exists(file_path):
+        abort(404)
+
+    mime_type, _ = mimetypes.guess_type(file_path)
+    if not mime_type:
+        mime_type = "application/octet-stream"
+
+    return send_file(
+        file_path,
+        mimetype=mime_type,
+        as_attachment=False,
+        download_name=Path(file_path).name,
+    )
 
 app.layout = dbc.Container(
     [
         dcc.Store(id="store-node-by-id", data={}),
         dcc.Store(id="store-selected", data={"level0": None, "level1": None, "level2": None}),
+        dcc.Store(id="store-file-sort", data={"column": "name", "direction": "asc", "index": None}),
+        dcc.Store(id="store-file-tab", data={"index": None, "active_tab": "tab-inputs"}),
+        dcc.Store(id="store-file-drag-ui", data={}),
+        dcc.Store(id="store-viewer-state", data={}),
+        dcc.Store(id="store-viewer-request", data=None),
+        dcc.Store(id="store-image-zoom", data={"scale": 1}),
         dbc.Row(
             [
                 dbc.Col(
@@ -462,12 +1087,40 @@ app.layout = dbc.Container(
             style={"position": "fixed", "top": 66, "right": 10, "width": 350, "zIndex": 9999},
             children=html.P(id="download-toast-body", className="mb-0 small"),
         ),
+        dbc.Modal(
+            [
+                dbc.ModalHeader(dbc.ModalTitle(id="viewer-modal-title")),
+                dcc.Loading(
+                    dbc.ModalBody(
+                        id="viewer-modal-body",
+                        style={
+                            "minHeight": "300px",
+                            "display": "flex",
+                            "justifyContent": "center",
+                            "alignItems": "center",
+                        },
+                    ),
+                    type="default",
+                    color="#6f42c1",
+                ),
+                dbc.ModalFooter(
+                    dbc.Button("Close", id="viewer-modal-close", color="secondary")
+                ),
+            ],
+            id="viewer-modal",
+            is_open=False,
+            size="xl",
+            scrollable=True,
+            backdrop=True,
+            centered=True,
+        ),
         dcc.Download(id="download-component"),
     ],
     fluid=True,
 )
 
 # --- [4. Callback Logic] ---
+
 def build_filter_components(filter_spec: FilterSpec) -> list:
     children = []
 
@@ -558,6 +1211,8 @@ def render_level0_item(node: NodeRef, details: DetailsData | None = None, active
 def update_level0_list(filter_values, filter_ids, selected):
     filters = build_filters(filter_values, filter_ids)
 
+    print("===== update_level0_list")
+
     level0_nodes = service.list_level0(filters=filters)
 
     if not level0_nodes:
@@ -586,32 +1241,80 @@ def highlight_selected_level0(selected, item_ids):
     ]
 
 
+LEVEL1_CARD_MAX = 6
+
 def render_level1_section(level1_nodes: list[NodeRef]):
-    columns = [
-        dbc.Col(render_level1_card(n), xs=12, sm=6, md=4, lg=4, className="d-flex align-items-stretch")
-        for n in level1_nodes
-    ]
-    return html.Div([dbc.Row(columns, className="g-3")], style={"maxHeight": "70vh", "overflowY": "auto", "padding": "10px"})
+    is_list = len(level1_nodes) > LEVEL1_CARD_MAX
+
+    container_style = {
+        "overflowY": "auto",
+        "padding": "10px",
+        "maxHeight": "45vh" if is_list else "70vh",
+    }
+
+    if not is_list:
+        columns = [
+            dbc.Col(
+                render_level1_card(n),
+                xs=12, sm=6, md=4, lg=4,
+                className="d-flex align-items-stretch",
+            )
+            for n in level1_nodes
+        ]
+        return html.Div(
+            [dbc.Row(columns, className="g-3")],
+            style=container_style,
+        )
+
+    items = [render_level1_list_item(n) for n in level1_nodes]
+
+    return html.Div(
+        [
+            html.Div(
+                f"Showing {len(level1_nodes)} items in list view.",
+                className="text-muted small px-2 pt-2 pb-1",
+            ),
+            dbc.ListGroup(items, flush=True),
+        ],
+        style=container_style,
+    )
 
 def render_level1_card(node: NodeRef):
+    card_body = dbc.CardBody(
+        [
+            html.Div(
+                node.summary.title or "Item",
+                className="fw-bold mb-1",
+                style={
+                    "minHeight": "20px",
+                    "lineHeight": "1.25",
+                    "userSelect": "text",
+                },
+            ),
+            html.Div(
+                node.summary.subtitle,
+                className="text-muted mb-2",
+                style={"fontSize": "13px", "userSelect": "text"},
+            ) if node.summary.subtitle else None,
+
+            render_id_row(
+                node.id,
+                label="SR ID",
+                className="small mb-2",
+                item_type=node.item_type,
+                show_external_button=True,
+            ),
+
+            render_badges(
+                badges_for_view(node.summary.badges or [], "card"),
+                className="",
+            ) if badges_for_view(node.summary.badges or [], "card") else None,
+        ]
+    )
+
     return html.Div(
         dbc.Card(
-            dbc.CardBody(
-                [
-                    render_summary_title_block(
-                        node.summary,
-                        title_class="fw-bold mb-1",
-                        title_style={
-                            "minHeight": "20px",
-                            "lineHeight": "1.25",
-                        },
-                        subtitle_class="text-muted mb-2",
-                        subtitle_style={"fontSize": "13px"},
-                        badges_class="",
-                        badge_view="card",
-                    )
-                ]
-            ),
+            card_body,
             className="h-100 shadow-sm border-0 sr-card-hover",
             style={"borderRadius": "14px"},
         ),
@@ -620,6 +1323,60 @@ def render_level1_card(node: NodeRef):
         style={"cursor": "pointer", "width": "100%"},
     )
 
+def render_level1_list_item(node: NodeRef):
+    badges = badges_for_view(node.summary.badges or [], "card")
+
+    return dbc.ListGroupItem(
+        [
+            html.Div(
+                [
+                    html.Div(
+                        [
+                            html.Div(
+                                node.summary.title or "Item",
+                                className="fw-semibold",
+                                style={
+                                    "fontSize": "15px",
+                                    "lineHeight": "1.25",
+                                    "userSelect": "text",
+                                },
+                            ),
+                            html.Div(
+                                node.summary.subtitle,
+                                className="text-muted mt-1",
+                                style={
+                                    "fontSize": "13px",
+                                    "lineHeight": "1.2",
+                                    "userSelect": "text",
+                                },
+                            ) if node.summary.subtitle else None,
+                        ],
+                        className="min-w-0 flex-grow-1",
+                    ),
+                    html.Div(
+                        render_id_row(
+                            node.id,
+                            label="SR ID",
+                            className="small text-nowrap ms-md-3 mt-2 mt-md-0",
+                            item_type=node.item_type,
+                            show_external_button=True,
+                        ),
+                        className="flex-shrink-0",
+                    ),
+                ],
+                className="d-flex flex-column flex-md-row align-items-md-start justify-content-between gap-2",
+            ),
+            render_badges(
+                badges,
+                className="mt-2",
+            ) if badges else None,
+        ],
+        id={"type": "level1-card", "index": node.id},
+        n_clicks=0,
+        action=True,
+        className="border-0 border-bottom py-3 shadow-sm",
+        style={"cursor": "pointer"},
+    )
 
 @callback(
     [
@@ -640,6 +1397,8 @@ def update_level0_view(n_clicks, node_map, selected):
     if not ctx.triggered_id or not any(n_clicks):
         return (dash.no_update,) * 7
 
+    print("===== update_level0_view")
+
     level0_id = ctx.triggered_id["index"]
     node_dict = (node_map or {}).get(level0_id)
 
@@ -651,12 +1410,16 @@ def update_level0_view(n_clicks, node_map, selected):
         return dash.no_update, level1_title, level2_title, render_placeholder(f"{level0_title} not found."), dash.no_update, dash.no_update, dash.no_update
 
     level0_node = node_from_dict(node_dict)
-
     level0_details = service.get_details(level0_node)
+
     level1_nodes = service.get_children(level0_node).children
     node_map = merge_node_map(node_map, level1_nodes)
 
-    header = render_header_from_details(level0_details)
+    header = render_header_from_details(
+        level0_details,
+        item_id=level0_id,
+        item_type=level0_node.item_type,
+    )
 
     if not level1_nodes:
         level1_cards = render_placeholder(f"No {level1_title} found.")
@@ -677,6 +1440,26 @@ def update_level0_view(n_clicks, node_map, selected):
     )
 
 
+def render_file_loading_placeholder():
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(className="spinner-border text-secondary mb-3", role="status"),
+                    html.Div("Loading file list...", className="text-muted small"),
+                ],
+                className="d-flex flex-column align-items-center justify-content-center",
+            )
+        ],
+        style={
+            "height": "160px",
+            "border": "1px dashed #ced4da",
+            "borderRadius": "8px",
+            "backgroundColor": "#fcfcfc",
+        },
+        className="w-100 mb-2",
+    )
+
 @callback(
     [
         Output("level2-accordion-area", "children"),
@@ -695,11 +1478,16 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
     if not any(n_clicks):
         return dash.no_update, [dash.no_update] * len(level1_ids), dash.no_update, dash.no_update, dash.no_update
 
+    print("===== update_level2_list")
+
     level1_id = ctx.triggered_id["index"]
 
     classnames = [
-        "h-100 shadow border border-3 border-primary bg-primary bg-opacity-10" if sid["index"] == level1_id
-        else "h-100 shadow-sm border-0"
+        (
+            "shadow border border-3 border-primary bg-primary bg-opacity-10"
+            if sid["index"] == level1_id
+            else "shadow-sm border-0"
+        )
         for sid in level1_ids
     ]
 
@@ -729,18 +1517,43 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
     for n in level2_nodes:
         accordion_items.append(
             dbc.AccordionItem(
-                [dcc.Loading(html.Div(id={"type": "level2-detail-content", "index": n.id}, children="Loading details..."))],
-                title=render_summary_title_block(
-                    n.summary,
-                    title_class="fw-bold",
-                    title_style={
-                        "fontSize": "16px",
-                        "lineHeight": "1.2",
-                    },
-                    subtitle_class="text-muted small mt-1",
-                    subtitle_style={},
-                    badges_class="mt-2",
-                    badge_view="header",
+                [
+                    dcc.Loading(
+                        html.Div(
+                            id={"type": "level2-detail-content", "index": n.id},
+                            children=render_file_loading_placeholder(),
+                        ),
+                        type="default",
+                        color="#6f42c1",
+                        delay_show=150,
+                        overlay_style={
+                            "visibility": "visible",
+                            "backgroundColor": "rgba(255,255,255,0.75)",
+                        },
+                    )
+                ],
+                title=html.Div(
+                    [
+                        html.Div(
+                            n.summary.title or "Item",
+                            className="fw-bold",
+                            style={
+                                "fontSize": "16px",
+                                "lineHeight": "1.2",
+                                "userSelect": "text",
+                            },
+                        ),
+                        html.Div(
+                            n.summary.subtitle,
+                            className="text-muted small mt-1",
+                            style={"userSelect": "text"},
+                        ) if n.summary.subtitle else None,
+                        render_badges(
+                            badges_for_view(n.summary.badges or [], "header"),
+                            className="mt-2",
+                        ) if badges_for_view(n.summary.badges or [], "header") else None,
+                    ],
+                    className="w-100",
                 ),
                 item_id=n.id,
             )
@@ -757,14 +1570,18 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
 @callback(
     Output({"type": "level2-detail-content", "index": MATCH}, "children"),
     Input("level2-accordion-root", "active_item"),
+    Input("store-file-sort", "data"),
+    Input("store-file-tab", "data"),
     State({"type": "level2-detail-content", "index": MATCH}, "id"),
     State("store-node-by-id", "data"),
     prevent_initial_call=True,
 )
-def render_level2_details(active_item, component_id, node_map):
+def update_level2_details(active_item, sort_state, tab_state, component_id, node_map):
     current_id = component_id["index"]
     if active_item != current_id:
         return dash.no_update
+
+    print("===== update_level2_details")
 
     node_dict = (node_map or {}).get(current_id)
     if not node_dict:
@@ -785,8 +1602,23 @@ def render_level2_details(active_item, component_id, node_map):
             className="pb-2",
         )
 
+    current_sort = sort_state or {"column": "name", "direction": "asc", "index": None}
+    if current_sort.get("index") != current_id:
+        current_sort = {"column": "name", "direction": "asc", "index": current_id}
+
+    current_tab = "tab-inputs"
+    if tab_state and tab_state.get("index") == current_id:
+        current_tab = tab_state.get("active_tab", "tab-inputs")
+
     return html.Div(
         [
+            render_id_row(
+                current_id,
+                label="WR ID",
+                className="small px-2 pt-2 mb-2",
+                item_type=node.item_type,
+                show_external_button=True,
+            ),
             html.Div(
                 [
                     dbc.Input(
@@ -802,14 +1634,14 @@ def render_level2_details(active_item, component_id, node_map):
             dbc.Tabs(
                 [
                     dbc.Tab(
-                        create_tree_table(inputs, "inputs", current_id),
+                        render_files_tab(inputs, "inputs", current_id, current_sort),
                         label=f"Input Files ({len(inputs)})",
                         tab_id="tab-inputs",
                         label_class_name="fw-bold text-primary",
                         className="p-2 border border-top-0 bg-white rounded-bottom",
                     ),
                     dbc.Tab(
-                        create_tree_table(outputs, "outputs", current_id),
+                        render_files_tab(outputs, "outputs", current_id, current_sort),
                         label=f"Output Files ({len(outputs)})",
                         tab_id="tab-outputs",
                         label_class_name="fw-bold text-success",
@@ -817,7 +1649,7 @@ def render_level2_details(active_item, component_id, node_map):
                     ),
                 ],
                 id={"type": "wr-tabs", "index": current_id},
-                active_tab="tab-inputs",
+                active_tab=current_tab,
             ),
         ],
         className="px-2 pb-2",
@@ -825,39 +1657,275 @@ def render_level2_details(active_item, component_id, node_map):
 
 clientside_callback(
     """
-    function(search_term, content_id) {
-        if (!content_id || typeof content_id.index === 'undefined') {
-            return window.dash_clientside.no_update;
+    function(search_term, input_id, current_class) {
+        if (!input_id || typeof input_id.index === "undefined") {
+            return current_class || "mb-2 shadow-sm";
         }
 
-        const term = search_term ? search_term.toLowerCase().trim() : "";
-        const currentIndex = String(content_id.index);
-
-        const rows = document.getElementsByClassName('file-row-item');
+        const term = (search_term || "").toLowerCase().trim();
+        const currentIndex = String(input_id.index);
+        const rows = document.getElementsByClassName("file-row-item");
 
         for (let i = 0; i < rows.length; i++) {
-            let row = rows[i];
+            const row = rows[i];
 
             if (row.id && row.id.includes(currentIndex)) {
-                const fileName = row.getAttribute('data-filename') || "";
-                if (fileName.includes(term)) {
-                    row.style.display = "";
-                } else {
-                    row.style.display = "none";
-                }
+                const fileName = (row.getAttribute("data-filename") || "").toLowerCase();
+                row.style.display = fileName.includes(term) ? "" : "none";
             }
         }
 
-        return window.dash_clientside.no_update;
+        return current_class || "mb-2 shadow-sm";
     }
     """,
-    Output({"type": "file-search", "index": MATCH}, "id"),
+    Output({"type": "file-search", "index": MATCH}, "className"),
     Input({"type": "file-search", "index": MATCH}, "value"),
-    State({"type": "level2-detail-content", "index": MATCH}, "id"),
+    State({"type": "file-search", "index": MATCH}, "id"),
+    State({"type": "file-search", "index": MATCH}, "className"),
     prevent_initial_call=True,
 )
 
 
+@callback(
+    Output("store-file-sort", "data"),
+    Input({"type": "file-sort", "column": ALL, "index": ALL}, "n_clicks"),
+    State({"type": "file-sort", "column": ALL, "index": ALL}, "id"),
+    State("store-file-sort", "data"),
+    prevent_initial_call=True,
+)
+def update_file_sort(n_clicks, ids, current_sort):
+    if not ctx.triggered_id:
+        return dash.no_update
+
+    triggered = ctx.triggered_id
+    column = triggered.get("column")
+    index = triggered.get("index")
+
+    current_sort = current_sort or {}
+    current_column = current_sort.get("column")
+    current_direction = current_sort.get("direction", "desc")
+    current_index = current_sort.get("index")
+
+    if current_column == column and current_index == index:
+        new_direction = "asc" if current_direction == "desc" else "desc"
+    else:
+        new_direction = "asc" if column == "name" else "desc"
+
+    return {
+        "column": column,
+        "direction": new_direction,
+        "index": index,
+    }
+
+@callback(
+    Output("store-file-tab", "data"),
+    Input({"type": "wr-tabs", "index": ALL}, "active_tab"),
+    State({"type": "wr-tabs", "index": ALL}, "id"),
+    State("store-file-tab", "data"),
+    prevent_initial_call=True,
+)
+def update_file_tab(active_tabs, ids, current_tab_state):
+    if not ctx.triggered_id:
+        return dash.no_update
+
+    triggered = ctx.triggered_id
+    index = triggered.get("index")
+
+    selected_tab = None
+    for tab_value, tab_id in zip(active_tabs or [], ids or []):
+        if tab_id.get("index") == index:
+            selected_tab = tab_value
+            break
+
+    if not selected_tab:
+        return dash.no_update
+
+    return {
+        "index": index,
+        "active_tab": selected_tab,
+    }
+
+
+@callback(
+    Output("viewer-modal", "is_open"),
+    Output("viewer-modal-title", "children"),
+    Output("viewer-modal-body", "children"),
+    Output("store-viewer-request", "data"),
+    Output("store-image-zoom", "data", allow_duplicate=True),
+    Input(
+        {"type": "btn-view", "index": ALL, "file_name": ALL, "category": ALL, "vault_id": ALL, "is_folder": ALL},
+        "n_clicks",
+    ),
+    Input("viewer-modal-close", "n_clicks"),
+    State(
+        {"type": "btn-view", "index": ALL, "file_name": ALL, "category": ALL, "vault_id": ALL, "is_folder": ALL},
+        "id",
+    ),
+    prevent_initial_call=True,
+)
+def open_viewer_modal(n_clicks_list, close_clicks, id_list):
+    triggered = ctx.triggered_id
+
+    if triggered == "viewer-modal-close":
+        return False, dash.no_update, dash.no_update, None, {"scale": 1.0}
+
+    if not triggered or not isinstance(triggered, dict) or triggered.get("type") != "btn-view":
+        return (
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+        )
+
+    if not n_clicks_list or not any((n or 0) > 0 for n in n_clicks_list):
+        return (
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+        )
+
+    triggered_clicks = 0
+    for clicks, btn_id in zip(n_clicks_list or [], id_list or []):
+        if btn_id == triggered:
+            triggered_clicks = clicks or 0
+            break
+
+    if triggered_clicks <= 0:
+        return (
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+        )
+
+    file_id = triggered.get("index")
+    file_name = triggered.get("file_name")
+    vault_id = triggered.get("vault_id")
+    is_folder = bool(triggered.get("is_folder", False))
+
+    if not file_id or not file_name or not vault_id or is_folder:
+        return (
+            True,
+            "Viewer",
+            html.Div("Cannot preview this item.", className="text-danger"),
+            None,
+            {"scale": 1.0},
+        )
+
+    loading_body = html.Div(
+        [
+            dbc.Spinner(size="md", color="secondary"),
+            html.Div("Loading preview...", className="text-muted mt-3"),
+        ],
+        className="d-flex flex-column justify-content-center align-items-center",
+        style={"minHeight": "50vh"},
+    )
+
+    return (
+        True,
+        file_name,
+        loading_body,
+        {
+            "file_id": file_id,
+            "file_name": file_name,
+            "vault_id": vault_id,
+        },
+        {"scale": 1.0},
+    )
+
+@callback(
+    Output("viewer-modal-body", "children", allow_duplicate=True),
+    Output("store-viewer-state", "data"),
+    Input("store-viewer-request", "data"),
+    prevent_initial_call=True,
+)
+def load_viewer_content(viewer_request):
+    if not viewer_request or not viewer_request.get("file_id"):
+        return dash.no_update, dash.no_update
+
+    file_id = viewer_request.get("file_id")
+    file_name = viewer_request.get("file_name")
+    vault_id = viewer_request.get("vault_id")
+
+    try:
+        request_id = uuid.uuid4().hex.upper()
+        request_dir = os.path.join(TEMP_VIEWER_PATH, request_id)
+        ensure_dir(request_dir)
+        touch_dir(request_dir)
+
+        local_path = os.path.join(request_dir, Path(file_name).name)
+        service.download_to_server_via_odata(vault_id=vault_id, dest=local_path)
+
+        if not os.path.exists(local_path):
+            return (
+                html.Div("Downloaded file not found.", className="text-danger"),
+                {},
+            )
+
+        body = build_viewer_content(local_path, file_name)
+
+        return (
+            body,
+            {
+                "file_id": file_id,
+                "file_name": file_name,
+                "local_path": local_path,
+            },
+        )
+
+    except Exception as e:
+        return (
+            html.Div(f"Viewer failed: {e}", className="text-danger"),
+            {},
+        )
+
+@callback(
+    Output("store-image-zoom", "data"),
+    Input("img-zoom-in", "n_clicks"),
+    Input("img-zoom-out", "n_clicks"),
+    Input("img-zoom-reset", "n_clicks"),
+    State("store-image-zoom", "data"),
+    prevent_initial_call=True,
+)
+def update_image_zoom(n_in, n_out, n_reset, zoom_data):
+    zoom_data = zoom_data or {"scale": 1.0}
+    scale = float(zoom_data.get("scale", 1.0))
+
+    triggered = ctx.triggered_id
+
+    if triggered == "img-zoom-in":
+        scale = min(scale + 0.25, 5.0)
+    elif triggered == "img-zoom-out":
+        scale = max(scale - 0.25, 0.25)
+    elif triggered == "img-zoom-reset":
+        scale = 1.0
+
+    return {"scale": scale}
+
+@callback(
+    Output("viewer-image", "style"),
+    Input("store-image-zoom", "data"),
+    prevent_initial_call=True,
+)
+def apply_image_zoom(zoom_data):
+    scale = float((zoom_data or {}).get("scale", 1.0))
+
+    return {
+        "maxWidth": "100%",
+        "maxHeight": "75vh",
+        "objectFit": "contain",
+        "cursor": "zoom-in",
+        "transition": "transform 0.2s ease",
+        "display": "block",
+        "margin": "0 auto",
+        "borderRadius": "6px",
+        "transform": f"scale({scale})",
+        "transformOrigin": "center center",
+    }
 
 @callback(
     [
@@ -901,12 +1969,10 @@ def handle_file_download(n_clicks_list, id_list):
         return dash.no_update, True, "Download failed: cannot resolve clicked file id.", ""
 
     try:
-        os.makedirs(TEMP_DOWNLOAD_PATH, exist_ok=True)
-
-        # Create an isolated work directory for this download request.
         request_id = str(uuid.uuid4().hex.upper())
         request_dir = os.path.join(TEMP_DOWNLOAD_PATH, request_id)
         os.makedirs(request_dir, exist_ok=True)
+        touch_dir(request_dir)
 
         # Target path inside the isolated request directory.
         target_path = os.path.join(request_dir, file_name) if file_name else None
@@ -965,5 +2031,50 @@ def handle_file_download(n_clicks_list, id_list):
         return dash.no_update, True, f"Transfer failed: {e}", ""
 
 
+@callback(
+    Output({"type": "file-upload-status", "index": MATCH, "category": MATCH}, "children"),
+    Input({"type": "file-upload", "index": MATCH, "category": MATCH}, "contents"),
+    State({"type": "file-upload", "index": MATCH, "category": MATCH}, "filename"),
+    State({"type": "file-upload", "index": MATCH, "category": MATCH}, "id"),
+    prevent_initial_call=True,
+)
+def handle_file_upload(contents_list, filenames, component_id):
+    if not contents_list or not filenames:
+        return dash.no_update
+
+    wr_id = component_id["index"]
+    category = component_id["category"]
+
+    try:
+        request_dir = os.path.join(TEMP_UPLOAD_PATH, str(wr_id), category)
+        touch_dir(request_dir)
+
+        saved_files = []
+
+        for contents, filename in zip(contents_list, filenames):
+            saved_path = save_uploaded_file(contents, filename, request_dir)
+            saved_files.append(Path(saved_path).name)
+
+        touch_dir(request_dir)
+
+        return html.Div(
+            [
+                html.Div(
+                    f"Uploaded {len(saved_files)} file(s) to {category}.",
+                    className="text-success fw-semibold",
+                ),
+                html.Ul(
+                    [html.Li(name) for name in saved_files],
+                    className="mb-0 mt-1",
+                ),
+            ]
+        )
+
+    except Exception as e:
+        return html.Div(f"Upload failed: {e}", className="text-danger")
+
+
 if __name__ == "__main__":
-    app.run(debug=True)
+    run_startup_cleanup()
+    start_temp_cleanup_scheduler()
+    app.run(host="127.0.0.1", debug=True)

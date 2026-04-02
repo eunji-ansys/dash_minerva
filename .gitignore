@@ -11,11 +11,12 @@ lib/
 # --- Environment variables & Secrets ---
 # Crucial: Never commit your Minerva credentials
 .env
+.env.integration
 .flaskenv
 
 # --- Project-specific temporary files ---
 # Local storage for files downloaded from Minerva before streaming to user
-temp_downloads/
+temp*/
 *.zip
 *.tar
 *.gz
