@@ -1,0 +1,38 @@
+.viewer-image-shell {
+    background: #000;
+    padding: 12px;
+    border-radius: 8px;
+}
+
+.viewer-image-stage {
+    position: relative;
+    overflow: auto;
+    width: 100%;
+    height: min(75vh, 900px);
+    cursor: grab;
+    user-select: none;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.viewer-image-stage.is-dragging {
+    cursor: grabbing;
+}
+
+.viewer-image {
+    display: block;
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
+
+    transform-origin: center center;
+    will-change: transform;
+    border-radius: 6px;
+    user-select: none;
+    -webkit-user-drag: none;
+    pointer-events: none;
+    flex: 0 0 auto;
+}

@@ -16,8 +16,7 @@ lib/
 
 # --- Project-specific temporary files ---
 # Local storage for files downloaded from Minerva before streaming to user
-temp_downloads/
-temp_uploads/
+temp*/
 *.zip
 *.tar
 *.gz

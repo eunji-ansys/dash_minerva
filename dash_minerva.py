@@ -16,6 +16,12 @@ import dash_bootstrap_components as dbc
 import glob
 from urllib.parse import quote
 from flask import logging, request, send_file, abort
+import mimetypes
+import pandas as pd
+import zipfile
+import tempfile
+import xml.etree.ElementTree as ET
+from openpyxl import load_workbook
 
 from logic.services.service_factory import get_service
 from datamodel.models import FilterFieldSpec, Filters, FilterSpec, NodeRef, NodeKind, DetailsData, FileNode, FileSet, Summary, Badge
@@ -26,6 +32,7 @@ print("### RUNNING DASH FILE:", __file__)
 load_dotenv()
 TEMP_DOWNLOAD_PATH = os.getenv("TEMP_DOWNLOAD_PATH", "./temp_downloads")
 TEMP_UPLOAD_PATH = os.getenv("TEMP_UPLOAD_PATH", "./temp_uploads")
+TEMP_VIEWER_PATH = os.getenv("TEMP_VIEWER_PATH", "./temp_viewer")
 
 # --- [1. Build service (tenant-agnostic) ] ---
 service = get_service()
@@ -36,13 +43,23 @@ print("### Service initialized:", service)
 FIXED_VIEWER_CONFIG = {
     ".pdf": "PDF_VIEWER",
     ".txt": "TEXT_VIEWER",
+    ".log": "TEXT_VIEWER",
+    ".xml": "TEXT_VIEWER",
     ".csv": "TABLE_VIEWER",
     ".xlsx": "TABLE_VIEWER",
+    ".png": "IMAGE_VIEWER",
+    ".jpg": "IMAGE_VIEWER",
+    ".jpeg": "IMAGE_VIEWER",
+    ".gif": "IMAGE_VIEWER",
+    ".bmp": "IMAGE_VIEWER",
+    ".svg": "IMAGE_VIEWER",
+    ".webp": "IMAGE_VIEWER",
 }
 PATTERN_VIEWER_CONFIG = [
     (r"\.s\d+p", "TOUCHSTONE_VIEWER"),
-    (r"\.v\d+", "VERSION_VIEWER")
 ]
+
+VIEWER_FILE_REGISTRY: dict[str, str] = {}
 
 def get_viewer_type_by_ext(file_name: str | None):
     if not file_name:
@@ -493,6 +510,12 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
         file_size = f.size or 0
         modified_on = getattr(f, "modified_on", None)
 
+        external_href = None
+        try:
+            external_href = service.build_file_item_url(item_id=file_id)
+        except Exception as e:
+            print(f"file external url build failed: {e}")
+
         rows.append(
             html.Tr(
                 [
@@ -529,7 +552,14 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
                             [
                                 dbc.Button(
                                     html.Img(src=dash.get_asset_url("icons/eye.svg"), style={"width": "14px"}),
-                                    id={"type": "btn-view", "index": file_id, "file_name": file_name, "category": category},
+                                    id={
+                                        "type": "btn-view",
+                                        "index": file_id,
+                                        "file_name": file_name,
+                                        "category": category,
+                                        "vault_id": vault_id,
+                                        "is_folder": is_folder,
+                                    },
                                     color="white",
                                     size="sm",
                                     className="border py-0 px-2",
@@ -555,11 +585,14 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
                                         src=dash.get_asset_url("icons/arrow-up-right-square.svg"),
                                         style={"width": "14px"},
                                     ),
-                                    id={"type": "btn-external", "index": file_id, "file_name": file_name, "category": category},
+                                    href=external_href,
+                                    target="_blank",
+                                    external_link=True,
                                     color="white",
                                     size="sm",
                                     className="ms-1 border py-0 px-2",
                                     title="Open in Minerva",
+                                    disabled=not external_href,
                                 ),
                             ],
                             size="sm",
@@ -686,6 +719,206 @@ def render_files_tab(file_list, category, active_item, sort_state):
         ]
     )
 
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
+
+
+def register_viewer_file(file_path: str) -> str:
+    token = uuid.uuid4().hex
+    VIEWER_FILE_REGISTRY[token] = file_path
+    return token
+
+
+def build_viewer_url(token: str) -> str:
+    return app.get_relative_path(f"/dash/viewer/{token}")
+
+
+def sanitize_xlsx_for_preview(file_path: str) -> str:
+    """
+    Create a sanitized copy of an xlsx file for preview purposes.
+    Removes workbook definedNames such as Print_Titles / Print_Area,
+    which can break openpyxl on some generated workbooks.
+    Returns the path to the sanitized temp file.
+    """
+    temp_dir = tempfile.mkdtemp(prefix="xlsx_preview_")
+    sanitized_path = os.path.join(temp_dir, Path(file_path).name)
+
+    with zipfile.ZipFile(file_path, "r") as zin:
+        with zipfile.ZipFile(sanitized_path, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                data = zin.read(item.filename)
+
+                if item.filename == "xl/workbook.xml":
+                    try:
+                        root = ET.fromstring(data)
+                        ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+
+                        defined_names = root.find("main:definedNames", ns)
+                        if defined_names is not None:
+                            root.remove(defined_names)
+
+                        data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+                    except Exception:
+                        # If sanitizing fails, keep original workbook.xml
+                        pass
+
+                zout.writestr(item, data)
+
+    return sanitized_path
+
+def build_table_preview(file_path: str, max_rows: int = 200):
+    ext = Path(file_path).suffix.lower()
+
+    try:
+        if ext == ".csv":
+            df = pd.read_csv(file_path, nrows=max_rows)
+
+        elif ext == ".xlsx":
+            preview_path = sanitize_xlsx_for_preview(file_path)
+
+            wb = load_workbook(preview_path, data_only=True, read_only=True)
+            ws = wb[wb.sheetnames[0]]
+
+            rows = list(ws.iter_rows(values_only=True, max_row=max_rows + 1))
+            if not rows:
+                return html.Div("Empty worksheet.", className="text-muted")
+
+            header = rows[0]
+            data_rows = rows[1:]
+
+            normalized_header = []
+            for i, col in enumerate(header):
+                normalized_header.append(str(col).strip() if col not in (None, "") else f"Column {i+1}")
+
+            df = pd.DataFrame(data_rows, columns=normalized_header)
+
+        else:
+            return html.Div("Unsupported table format.", className="text-muted")
+
+        return html.Div(
+            [
+                html.Div(
+                    f"Previewing first {min(len(df), max_rows)} row(s)",
+                    className="text-muted small mb-2",
+                ),
+                dbc.Table.from_dataframe(
+                    df,
+                    striped=True,
+                    bordered=True,
+                    hover=True,
+                    size="sm",
+                    responsive=True,
+                    className="mb-0",
+                ),
+            ],
+            style={"maxHeight": "70vh", "overflow": "auto"},
+        )
+
+    except Exception as e:
+        return html.Div(
+            [
+                html.Div("Preview not available for this Excel file.", className="fw-semibold"),
+                html.Div("This file contains unsupported Excel metadata.", className="text-muted small"),
+                html.Div("Please download and open in Excel.", className="text-muted small mt-2"),
+            ],
+            className="p-3",
+        )
+
+
+def build_text_preview(file_path: str, max_chars: int = 200000):
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(max_chars)
+
+        return html.Pre(
+            content,
+            style={
+                "maxHeight": "70vh",
+                "overflow": "auto",
+                "whiteSpace": "pre-wrap",
+                "wordBreak": "break-word",
+                "fontSize": "13px",
+                "marginBottom": "0",
+                "backgroundColor": "#f8f9fa",
+                "padding": "12px",
+                "border": "1px solid #dee2e6",
+                "borderRadius": "8px",
+            },
+        )
+    except Exception as e:
+        return html.Div(f"Failed to load text preview: {e}", className="text-danger")
+
+
+def build_generic_iframe(token: str):
+    return html.Iframe(
+        src=build_viewer_url(token),
+        style={
+            "width": "100%",
+            "height": "75vh",
+            "border": "0",
+            "borderRadius": "8px",
+            "backgroundColor": "white",
+        },
+    )
+
+
+def build_viewer_content(file_path: str, file_name: str):
+    viewer_type = get_viewer_type_by_ext(file_name)
+    ext = Path(file_name).suffix.lower()
+
+    if viewer_type == "PDF_VIEWER":
+        token = register_viewer_file(file_path)
+        return build_generic_iframe(token)
+
+    if viewer_type == "TEXT_VIEWER":
+        return build_text_preview(file_path)
+
+    if viewer_type == "TABLE_VIEWER":
+        return build_table_preview(file_path)
+
+    if viewer_type == "TOUCHSTONE_VIEWER":
+        return html.Div(
+            [
+                html.Div("Touchstone preview is not implemented yet.", className="fw-semibold mb-2"),
+                html.Div(file_name, className="text-muted small"),
+                build_text_preview(file_path, max_chars=50000),
+            ]
+        )
+
+    if viewer_type == "IMAGE_VIEWER":
+        token = register_viewer_file(file_path)
+
+        return html.Div(
+            [
+                html.Div(
+                    [
+                        html.Img(
+                            id="viewer-image",
+                            src=build_viewer_url(token),
+                            className="viewer-image",
+                            draggable="false",
+                        )
+                    ],
+                    id="viewer-image-stage",
+                    className="viewer-image-stage",
+                    **{"data-scale": "1"},
+                )
+            ],
+            className="viewer-image-shell",
+        )
+
+    mime_type, _ = mimetypes.guess_type(file_path)
+    if mime_type and (mime_type.startswith("image/") or mime_type in ("application/pdf", "text/plain")):
+        token = register_viewer_file(file_path)
+        return build_generic_iframe(token)
+
+    return html.Div(
+        [
+            html.Div("This file type does not support inline preview.", className="fw-semibold"),
+            html.Div(file_name, className="text-muted small mt-1"),
+        ],
+        className="p-3",
+    )
 
 # --- [3. App Initialization & Layout] ---
 app = dash.Dash(
@@ -695,7 +928,25 @@ app = dash.Dash(
     suppress_callback_exceptions=True,
 )
 
+server = app.server
 
+@server.route("/dash/viewer/<token>")
+def serve_viewer_file(token):
+    file_path = VIEWER_FILE_REGISTRY.get(token)
+
+    if not file_path or not os.path.exists(file_path):
+        abort(404)
+
+    mime_type, _ = mimetypes.guess_type(file_path)
+    if not mime_type:
+        mime_type = "application/octet-stream"
+
+    return send_file(
+        file_path,
+        mimetype=mime_type,
+        as_attachment=False,
+        download_name=Path(file_path).name,
+    )
 
 app.layout = dbc.Container(
     [
@@ -704,6 +955,9 @@ app.layout = dbc.Container(
         dcc.Store(id="store-file-sort", data={"column": "name", "direction": "asc", "index": None}),
         dcc.Store(id="store-file-tab", data={"index": None, "active_tab": "tab-inputs"}),
         dcc.Store(id="store-file-drag-ui", data={}),
+        dcc.Store(id="store-viewer-state", data={}),
+        dcc.Store(id="store-viewer-request", data=None),
+        dcc.Store(id="store-image-zoom", data={"scale": 1}),
         dbc.Row(
             [
                 dbc.Col(
@@ -781,6 +1035,33 @@ app.layout = dbc.Container(
             icon="info",
             style={"position": "fixed", "top": 66, "right": 10, "width": 350, "zIndex": 9999},
             children=html.P(id="download-toast-body", className="mb-0 small"),
+        ),
+        dbc.Modal(
+            [
+                dbc.ModalHeader(dbc.ModalTitle(id="viewer-modal-title")),
+                dcc.Loading(
+                    dbc.ModalBody(
+                        id="viewer-modal-body",
+                        style={
+                            "minHeight": "300px",
+                            "display": "flex",
+                            "justifyContent": "center",
+                            "alignItems": "center",
+                        },
+                    ),
+                    type="default",
+                    color="#6f42c1",
+                ),
+                dbc.ModalFooter(
+                    dbc.Button("Close", id="viewer-modal-close", color="secondary")
+                ),
+            ],
+            id="viewer-modal",
+            is_open=False,
+            size="xl",
+            scrollable=True,
+            backdrop=True,
+            centered=True,
         ),
         dcc.Download(id="download-component"),
     ],
@@ -1108,6 +1389,26 @@ def update_level0_view(n_clicks, node_map, selected):
     )
 
 
+def render_file_loading_placeholder():
+    return html.Div(
+        [
+            html.Div(
+                [
+                    html.Div(className="spinner-border text-secondary mb-3", role="status"),
+                    html.Div("Loading file list...", className="text-muted small"),
+                ],
+                className="d-flex flex-column align-items-center justify-content-center",
+            )
+        ],
+        style={
+            "height": "160px",
+            "border": "1px dashed #ced4da",
+            "borderRadius": "8px",
+            "backgroundColor": "#fcfcfc",
+        },
+        className="w-100 mb-2",
+    )
+
 @callback(
     [
         Output("level2-accordion-area", "children"),
@@ -1165,7 +1466,21 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
     for n in level2_nodes:
         accordion_items.append(
             dbc.AccordionItem(
-                [dcc.Loading(html.Div(id={"type": "level2-detail-content", "index": n.id}, children="Loading details..."))],
+                [
+                    dcc.Loading(
+                        html.Div(
+                            id={"type": "level2-detail-content", "index": n.id},
+                            children=render_file_loading_placeholder(),
+                        ),
+                        type="default",
+                        color="#6f42c1",
+                        delay_show=150,
+                        overlay_style={
+                            "visibility": "visible",
+                            "backgroundColor": "rgba(255,255,255,0.75)",
+                        },
+                    )
+                ],
                 title=html.Div(
                     [
                         html.Div(
@@ -1182,7 +1497,6 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
                             className="text-muted small mt-1",
                             style={"userSelect": "text"},
                         ) if n.summary.subtitle else None,
-
                         render_badges(
                             badges_for_view(n.summary.badges or [], "header"),
                             className="mt-2",
@@ -1378,6 +1692,189 @@ def update_file_tab(active_tabs, ids, current_tab_state):
     return {
         "index": index,
         "active_tab": selected_tab,
+    }
+
+
+@callback(
+    Output("viewer-modal", "is_open"),
+    Output("viewer-modal-title", "children"),
+    Output("viewer-modal-body", "children"),
+    Output("store-viewer-request", "data"),
+    Output("store-image-zoom", "data", allow_duplicate=True),
+    Input(
+        {"type": "btn-view", "index": ALL, "file_name": ALL, "category": ALL, "vault_id": ALL, "is_folder": ALL},
+        "n_clicks",
+    ),
+    Input("viewer-modal-close", "n_clicks"),
+    State(
+        {"type": "btn-view", "index": ALL, "file_name": ALL, "category": ALL, "vault_id": ALL, "is_folder": ALL},
+        "id",
+    ),
+    prevent_initial_call=True,
+)
+def open_viewer_modal(n_clicks_list, close_clicks, id_list):
+    triggered = ctx.triggered_id
+
+    if triggered == "viewer-modal-close":
+        return False, dash.no_update, dash.no_update, None, {"scale": 1.0}
+
+    if not triggered or not isinstance(triggered, dict) or triggered.get("type") != "btn-view":
+        return (
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+        )
+
+    if not n_clicks_list or not any((n or 0) > 0 for n in n_clicks_list):
+        return (
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+        )
+
+    triggered_clicks = 0
+    for clicks, btn_id in zip(n_clicks_list or [], id_list or []):
+        if btn_id == triggered:
+            triggered_clicks = clicks or 0
+            break
+
+    if triggered_clicks <= 0:
+        return (
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+        )
+
+    file_id = triggered.get("index")
+    file_name = triggered.get("file_name")
+    vault_id = triggered.get("vault_id")
+    is_folder = bool(triggered.get("is_folder", False))
+
+    if not file_id or not file_name or not vault_id or is_folder:
+        return (
+            True,
+            "Viewer",
+            html.Div("Cannot preview this item.", className="text-danger"),
+            None,
+            {"scale": 1.0},
+        )
+
+    loading_body = html.Div(
+        [
+            dbc.Spinner(size="md", color="secondary"),
+            html.Div("Loading preview...", className="text-muted mt-3"),
+        ],
+        className="d-flex flex-column justify-content-center align-items-center",
+        style={"minHeight": "50vh"},
+    )
+
+    return (
+        True,
+        file_name,
+        loading_body,
+        {
+            "file_id": file_id,
+            "file_name": file_name,
+            "vault_id": vault_id,
+        },
+        {"scale": 1.0},
+    )
+
+@callback(
+    Output("viewer-modal-body", "children", allow_duplicate=True),
+    Output("store-viewer-state", "data"),
+    Input("store-viewer-request", "data"),
+    prevent_initial_call=True,
+)
+def load_viewer_content(viewer_request):
+    if not viewer_request or not viewer_request.get("file_id"):
+        return dash.no_update, dash.no_update
+
+    file_id = viewer_request.get("file_id")
+    file_name = viewer_request.get("file_name")
+    vault_id = viewer_request.get("vault_id")
+
+    try:
+        ensure_dir(TEMP_VIEWER_PATH)
+
+        request_id = uuid.uuid4().hex.upper()
+        request_dir = os.path.join(TEMP_VIEWER_PATH, request_id)
+        ensure_dir(request_dir)
+
+        local_path = os.path.join(request_dir, Path(file_name).name)
+        service.download_to_server_via_odata(vault_id=vault_id, dest=local_path)
+
+        if not os.path.exists(local_path):
+            return (
+                html.Div("Downloaded file not found.", className="text-danger"),
+                {},
+            )
+
+        body = build_viewer_content(local_path, file_name)
+
+        return (
+            body,
+            {
+                "file_id": file_id,
+                "file_name": file_name,
+                "local_path": local_path,
+            },
+        )
+
+    except Exception as e:
+        return (
+            html.Div(f"Viewer failed: {e}", className="text-danger"),
+            {},
+        )
+
+@callback(
+    Output("store-image-zoom", "data"),
+    Input("img-zoom-in", "n_clicks"),
+    Input("img-zoom-out", "n_clicks"),
+    Input("img-zoom-reset", "n_clicks"),
+    State("store-image-zoom", "data"),
+    prevent_initial_call=True,
+)
+def update_image_zoom(n_in, n_out, n_reset, zoom_data):
+    zoom_data = zoom_data or {"scale": 1.0}
+    scale = float(zoom_data.get("scale", 1.0))
+
+    triggered = ctx.triggered_id
+
+    if triggered == "img-zoom-in":
+        scale = min(scale + 0.25, 5.0)
+    elif triggered == "img-zoom-out":
+        scale = max(scale - 0.25, 0.25)
+    elif triggered == "img-zoom-reset":
+        scale = 1.0
+
+    return {"scale": scale}
+
+@callback(
+    Output("viewer-image", "style"),
+    Input("store-image-zoom", "data"),
+    prevent_initial_call=True,
+)
+def apply_image_zoom(zoom_data):
+    scale = float((zoom_data or {}).get("scale", 1.0))
+
+    return {
+        "maxWidth": "100%",
+        "maxHeight": "75vh",
+        "objectFit": "contain",
+        "cursor": "zoom-in",
+        "transition": "transform 0.2s ease",
+        "display": "block",
+        "margin": "0 auto",
+        "borderRadius": "6px",
+        "transform": f"scale({scale})",
+        "transformOrigin": "center center",
     }
 
 @callback(

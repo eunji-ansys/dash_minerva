@@ -276,6 +276,9 @@ class OOTBService:
 
         return f"{base_url}/?StartItem={start_item}"
 
+    def build_file_item_url(self, item_id: str) -> str:
+        return self.build_item_url(item_id, item_type=self.mapping.data_item_type)
+
     # ---------------- UI Contract ----------------
 
     def list_level0(self, *, filters: Optional[dict[str, Any]] = None) -> List[NodeRef]:
