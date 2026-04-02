@@ -9,6 +9,8 @@ from pathlib import Path
 import math
 from typing import Any, List, TypedDict, TypeAlias
 from dotenv import load_dotenv
+import time
+import threading
 
 import dash
 from dash import dcc, html, Input, Output, State, callback, clientside_callback, ALL, MATCH, ctx
@@ -722,6 +724,55 @@ def render_files_tab(file_list, category, active_item, sort_state):
 def ensure_dir(path: str):
     os.makedirs(path, exist_ok=True)
 
+
+def touch_dir(path: str):
+    try:
+        os.makedirs(path, exist_ok=True)
+        now = time.time()
+        os.utime(path, (now, now))
+    except Exception as e:
+        print(f"[TEMP TOUCH ERROR] {path}: {e}")
+
+def cleanup_temp_dirs(base_path: str, ttl_seconds: int):
+    now = time.time()
+    if not base_path or not os.path.exists(base_path):
+        return
+
+    for name in os.listdir(base_path):
+        path = os.path.join(base_path, name)
+        try:
+            if not os.path.isdir(path):
+                continue
+            age = now - os.path.getmtime(path)
+            if age > ttl_seconds:
+                shutil.rmtree(path, ignore_errors=False)
+                print(f"[TEMP CLEANUP] Removed expired temp dir: {path}")
+        except FileNotFoundError:
+            continue
+        except PermissionError as e:
+            print(f"[TEMP CLEANUP SKIP] In use or locked: {path} ({e})")
+        except Exception as e:
+            print(f"[TEMP CLEANUP ERROR] {path}: {e}")
+
+def run_startup_cleanup():
+    cleanup_temp_dirs(TEMP_VIEWER_PATH, ttl_seconds=2 * 60 * 60)
+    cleanup_temp_dirs(TEMP_DOWNLOAD_PATH, ttl_seconds=2 * 60 * 60)
+    cleanup_temp_dirs(TEMP_UPLOAD_PATH, ttl_seconds=24 * 60 * 60)
+
+def start_temp_cleanup_scheduler():
+    def _loop():
+        while True:
+            try:
+                cleanup_temp_dirs(TEMP_VIEWER_PATH, ttl_seconds=2 * 60 * 60)
+                cleanup_temp_dirs(TEMP_DOWNLOAD_PATH, ttl_seconds=2 * 60 * 60)
+                cleanup_temp_dirs(TEMP_UPLOAD_PATH, ttl_seconds=24 * 60 * 60)
+            except Exception as e:
+                print(f"[TEMP CLEANUP LOOP ERROR] {e}")
+            time.sleep(10 * 60)
+
+    t = threading.Thread(target=_loop, daemon=True, name="temp-cleanup-thread")
+    t.start()
+    return t
 
 def register_viewer_file(file_path: str) -> str:
     token = uuid.uuid4().hex
@@ -1801,11 +1852,10 @@ def load_viewer_content(viewer_request):
     vault_id = viewer_request.get("vault_id")
 
     try:
-        ensure_dir(TEMP_VIEWER_PATH)
-
         request_id = uuid.uuid4().hex.upper()
         request_dir = os.path.join(TEMP_VIEWER_PATH, request_id)
         ensure_dir(request_dir)
+        touch_dir(request_dir)
 
         local_path = os.path.join(request_dir, Path(file_name).name)
         service.download_to_server_via_odata(vault_id=vault_id, dest=local_path)
@@ -1919,12 +1969,10 @@ def handle_file_download(n_clicks_list, id_list):
         return dash.no_update, True, "Download failed: cannot resolve clicked file id.", ""
 
     try:
-        os.makedirs(TEMP_DOWNLOAD_PATH, exist_ok=True)
-
-        # Create an isolated work directory for this download request.
         request_id = str(uuid.uuid4().hex.upper())
         request_dir = os.path.join(TEMP_DOWNLOAD_PATH, request_id)
         os.makedirs(request_dir, exist_ok=True)
+        touch_dir(request_dir)
 
         # Target path inside the isolated request directory.
         target_path = os.path.join(request_dir, file_name) if file_name else None
@@ -1999,11 +2047,15 @@ def handle_file_upload(contents_list, filenames, component_id):
 
     try:
         request_dir = os.path.join(TEMP_UPLOAD_PATH, str(wr_id), category)
+        touch_dir(request_dir)
+
         saved_files = []
 
         for contents, filename in zip(contents_list, filenames):
             saved_path = save_uploaded_file(contents, filename, request_dir)
             saved_files.append(Path(saved_path).name)
+
+        touch_dir(request_dir)
 
         return html.Div(
             [
@@ -2023,4 +2075,6 @@ def handle_file_upload(contents_list, filenames, component_id):
 
 
 if __name__ == "__main__":
-    app.run(host="tokw22min01", debug=True)
+    run_startup_cleanup()
+    start_temp_cleanup_scheduler()
+    app.run(host="127.0.0.1", debug=True)
