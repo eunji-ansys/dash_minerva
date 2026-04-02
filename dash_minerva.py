@@ -2077,4 +2077,4 @@ def handle_file_upload(contents_list, filenames, component_id):
 if __name__ == "__main__":
     run_startup_cleanup()
     start_temp_cleanup_scheduler()
-    app.run(host="tokw22min01", debug=True)
+    app.run(host="127.0.0.1", debug=True)
