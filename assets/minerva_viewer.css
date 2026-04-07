@@ -86,6 +86,33 @@
     background-color: #3b82f6;
 }
 
+.level2-accordion-item .accordion-button {
+    background-color: #f8f9fa !important;
+    color: #212529 !important;
+}
+
+.level2-accordion-item .accordion-button:not(.collapsed) {
+    background-color: #e9f2ff !important;
+    color: #0d6efd !important;
+    box-shadow: none !important;
+}
+
+.level2-accordion-item .accordion-button:focus {
+    box-shadow: none !important;
+}
+
+.level2-header {
+    background-color: transparent !important;
+}
+
+.level2-title {
+    color: #212529 !important;
+}
+
+.level2-subtitle {
+    color: #6c757d !important;
+}
+
 .viewer-image:hover {
     transform: scale(1.05);
 }

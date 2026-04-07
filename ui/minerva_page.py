@@ -1,13 +1,10 @@
-import re
 import os
 import uuid
 import shutil
-import json
 import base64
-from datetime import datetime
 from pathlib import Path
 import math
-from typing import Any, List, TypedDict, TypeAlias
+from typing import Any
 from dotenv import load_dotenv
 import time
 import threading
@@ -15,18 +12,29 @@ import threading
 import dash
 from dash import dcc, html, Input, Output, State, callback, clientside_callback, ALL, MATCH, ctx
 import dash_bootstrap_components as dbc
-import glob
-from urllib.parse import quote
-from flask import logging, request, send_file, abort
-import mimetypes
-import pandas as pd
-import zipfile
-import tempfile
-import xml.etree.ElementTree as ET
-from openpyxl import load_workbook
 
 from logic.services.service_factory import get_service
-from datamodel.models import FilterFieldSpec, Filters, FilterSpec, NodeRef, NodeKind, DetailsData, FileNode, FileSet, Summary, Badge
+from datamodel.models import (
+    FilterFieldSpec,
+    Filters,
+    FilterSpec,
+    NodeRef,
+    NodeKind,
+    DetailsData,
+    FileNode,
+    Summary,
+    Badge
+)
+from logic.viewer.viewer_file_resolver import (
+    ViewerFileRef,
+    ViewerFile,
+    resolve_viewer_file,
+    get_viewer_type,
+)
+from ui.viewer.viewer_manager import (
+    render_viewer_content,
+)
+
 
 print("### RUNNING DASH FILE:", __file__)
 
@@ -42,37 +50,7 @@ service = get_service()
 print("### Service initialized:", service)
 
 # --- [2. Helper Functions] ---
-FIXED_VIEWER_CONFIG = {
-    ".pdf": "PDF_VIEWER",
-    ".txt": "TEXT_VIEWER",
-    ".log": "TEXT_VIEWER",
-    ".xml": "TEXT_VIEWER",
-    ".csv": "TABLE_VIEWER",
-    ".xlsx": "TABLE_VIEWER",
-    ".png": "IMAGE_VIEWER",
-    ".jpg": "IMAGE_VIEWER",
-    ".jpeg": "IMAGE_VIEWER",
-    ".gif": "IMAGE_VIEWER",
-    ".bmp": "IMAGE_VIEWER",
-    ".svg": "IMAGE_VIEWER",
-    ".webp": "IMAGE_VIEWER",
-}
-PATTERN_VIEWER_CONFIG = [
-    (r"\.s\d+p", "TOUCHSTONE_VIEWER"),
-]
 
-VIEWER_FILE_REGISTRY: dict[str, str] = {}
-
-def get_viewer_type_by_ext(file_name: str | None):
-    if not file_name:
-        return None
-    _, ext = os.path.splitext(file_name.lower())
-    if ext in FIXED_VIEWER_CONFIG:
-        return FIXED_VIEWER_CONFIG[ext]
-    for pattern, viewer_type in PATTERN_VIEWER_CONFIG:
-        if re.fullmatch(pattern, ext):
-            return viewer_type
-    return None
 
 def render_placeholder(text, height="150px"):
     return html.Div(
@@ -567,7 +545,7 @@ def create_tree_table(file_list: list[FileNode], category: str, active_item: str
                                     className="border py-0 px-2",
                                     style={
                                         "visibility": "visible"
-                                        if (not is_folder and get_viewer_type_by_ext(file_name))
+                                        if (not is_folder and get_viewer_type(file_name))
                                         else "hidden"
                                     },
                                 ),
@@ -759,10 +737,22 @@ def run_startup_cleanup():
     cleanup_temp_dirs(TEMP_DOWNLOAD_PATH, ttl_seconds=2 * 60 * 60)
     cleanup_temp_dirs(TEMP_UPLOAD_PATH, ttl_seconds=24 * 60 * 60)
 
+_CLEANUP_THREAD_STARTED = False
+
 def start_temp_cleanup_scheduler():
+    global _CLEANUP_THREAD_STARTED
+
+    if _CLEANUP_THREAD_STARTED:
+        print("### temp cleanup thread already started")
+        return
+
+    _CLEANUP_THREAD_STARTED = True
+
     def _loop():
+        print("### temp cleanup thread started")
         while True:
             try:
+                print("### temp cleanup tick")
                 cleanup_temp_dirs(TEMP_VIEWER_PATH, ttl_seconds=2 * 60 * 60)
                 cleanup_temp_dirs(TEMP_DOWNLOAD_PATH, ttl_seconds=2 * 60 * 60)
                 cleanup_temp_dirs(TEMP_UPLOAD_PATH, ttl_seconds=24 * 60 * 60)
@@ -772,234 +762,12 @@ def start_temp_cleanup_scheduler():
 
     t = threading.Thread(target=_loop, daemon=True, name="temp-cleanup-thread")
     t.start()
-    return t
-
-def register_viewer_file(file_path: str) -> str:
-    token = uuid.uuid4().hex
-    VIEWER_FILE_REGISTRY[token] = file_path
-    return token
-
-
-def build_viewer_url(token: str) -> str:
-    return app.get_relative_path(f"/dash/viewer/{token}")
-
-
-def sanitize_xlsx_for_preview(file_path: str) -> str:
-    """
-    Create a sanitized copy of an xlsx file for preview purposes.
-    Removes workbook definedNames such as Print_Titles / Print_Area,
-    which can break openpyxl on some generated workbooks.
-    Returns the path to the sanitized temp file.
-    """
-    temp_dir = tempfile.mkdtemp(prefix="xlsx_preview_")
-    sanitized_path = os.path.join(temp_dir, Path(file_path).name)
-
-    with zipfile.ZipFile(file_path, "r") as zin:
-        with zipfile.ZipFile(sanitized_path, "w", zipfile.ZIP_DEFLATED) as zout:
-            for item in zin.infolist():
-                data = zin.read(item.filename)
-
-                if item.filename == "xl/workbook.xml":
-                    try:
-                        root = ET.fromstring(data)
-                        ns = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-
-                        defined_names = root.find("main:definedNames", ns)
-                        if defined_names is not None:
-                            root.remove(defined_names)
-
-                        data = ET.tostring(root, encoding="utf-8", xml_declaration=True)
-                    except Exception:
-                        # If sanitizing fails, keep original workbook.xml
-                        pass
-
-                zout.writestr(item, data)
-
-    return sanitized_path
-
-def build_table_preview(file_path: str, max_rows: int = 200):
-    ext = Path(file_path).suffix.lower()
-
-    try:
-        if ext == ".csv":
-            df = pd.read_csv(file_path, nrows=max_rows)
-
-        elif ext == ".xlsx":
-            preview_path = sanitize_xlsx_for_preview(file_path)
-
-            wb = load_workbook(preview_path, data_only=True, read_only=True)
-            ws = wb[wb.sheetnames[0]]
-
-            rows = list(ws.iter_rows(values_only=True, max_row=max_rows + 1))
-            if not rows:
-                return html.Div("Empty worksheet.", className="text-muted")
-
-            header = rows[0]
-            data_rows = rows[1:]
-
-            normalized_header = []
-            for i, col in enumerate(header):
-                normalized_header.append(str(col).strip() if col not in (None, "") else f"Column {i+1}")
-
-            df = pd.DataFrame(data_rows, columns=normalized_header)
-
-        else:
-            return html.Div("Unsupported table format.", className="text-muted")
-
-        return html.Div(
-            [
-                html.Div(
-                    f"Previewing first {min(len(df), max_rows)} row(s)",
-                    className="text-muted small mb-2",
-                ),
-                dbc.Table.from_dataframe(
-                    df,
-                    striped=True,
-                    bordered=True,
-                    hover=True,
-                    size="sm",
-                    responsive=True,
-                    className="mb-0",
-                ),
-            ],
-            style={"maxHeight": "70vh", "overflow": "auto"},
-        )
-
-    except Exception as e:
-        return html.Div(
-            [
-                html.Div("Preview not available for this Excel file.", className="fw-semibold"),
-                html.Div("This file contains unsupported Excel metadata.", className="text-muted small"),
-                html.Div("Please download and open in Excel.", className="text-muted small mt-2"),
-            ],
-            className="p-3",
-        )
-
-
-def build_text_preview(file_path: str, max_chars: int = 200000):
-    try:
-        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read(max_chars)
-
-        return html.Pre(
-            content,
-            style={
-                "maxHeight": "70vh",
-                "overflow": "auto",
-                "whiteSpace": "pre-wrap",
-                "wordBreak": "break-word",
-                "fontSize": "13px",
-                "marginBottom": "0",
-                "backgroundColor": "#f8f9fa",
-                "padding": "12px",
-                "border": "1px solid #dee2e6",
-                "borderRadius": "8px",
-            },
-        )
-    except Exception as e:
-        return html.Div(f"Failed to load text preview: {e}", className="text-danger")
-
-
-def build_generic_iframe(token: str):
-    return html.Iframe(
-        src=build_viewer_url(token),
-        style={
-            "width": "100%",
-            "height": "75vh",
-            "border": "0",
-            "borderRadius": "8px",
-            "backgroundColor": "white",
-        },
-    )
-
-
-def build_viewer_content(file_path: str, file_name: str):
-    viewer_type = get_viewer_type_by_ext(file_name)
-    ext = Path(file_name).suffix.lower()
-
-    if viewer_type == "PDF_VIEWER":
-        token = register_viewer_file(file_path)
-        return build_generic_iframe(token)
-
-    if viewer_type == "TEXT_VIEWER":
-        return build_text_preview(file_path)
-
-    if viewer_type == "TABLE_VIEWER":
-        return build_table_preview(file_path)
-
-    if viewer_type == "TOUCHSTONE_VIEWER":
-        return html.Div(
-            [
-                html.Div("Touchstone preview is not implemented yet.", className="fw-semibold mb-2"),
-                html.Div(file_name, className="text-muted small"),
-                build_text_preview(file_path, max_chars=50000),
-            ]
-        )
-
-    if viewer_type == "IMAGE_VIEWER":
-        token = register_viewer_file(file_path)
-
-        return html.Div(
-            [
-                html.Div(
-                    [
-                        html.Img(
-                            id="viewer-image",
-                            src=build_viewer_url(token),
-                            className="viewer-image",
-                            draggable="false",
-                        )
-                    ],
-                    id="viewer-image-stage",
-                    className="viewer-image-stage",
-                    **{"data-scale": "1"},
-                )
-            ],
-            className="viewer-image-shell",
-        )
-
-    mime_type, _ = mimetypes.guess_type(file_path)
-    if mime_type and (mime_type.startswith("image/") or mime_type in ("application/pdf", "text/plain")):
-        token = register_viewer_file(file_path)
-        return build_generic_iframe(token)
-
-    return html.Div(
-        [
-            html.Div("This file type does not support inline preview.", className="fw-semibold"),
-            html.Div(file_name, className="text-muted small mt-1"),
-        ],
-        className="p-3",
-    )
 
 # --- [3. App Initialization & Layout] ---
-app = dash.Dash(
-    __name__,
-    #requests_pathname_prefix="/AnsysMinerva/custom/dash/",
-    external_stylesheets=[dbc.themes.FLATLY, dbc.icons.BOOTSTRAP],
-    suppress_callback_exceptions=True,
-)
 
-server = app.server
+def layout():
 
-@server.route("/dash/viewer/<token>")
-def serve_viewer_file(token):
-    file_path = VIEWER_FILE_REGISTRY.get(token)
-
-    if not file_path or not os.path.exists(file_path):
-        abort(404)
-
-    mime_type, _ = mimetypes.guess_type(file_path)
-    if not mime_type:
-        mime_type = "application/octet-stream"
-
-    return send_file(
-        file_path,
-        mimetype=mime_type,
-        as_attachment=False,
-        download_name=Path(file_path).name,
-    )
-
-app.layout = dbc.Container(
+    return dbc.Container(
     [
         dcc.Store(id="store-node-by-id", data={}),
         dcc.Store(id="store-selected", data={"level0": None, "level1": None, "level2": None}),
@@ -1536,7 +1304,7 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
                     [
                         html.Div(
                             n.summary.title or "Item",
-                            className="fw-bold",
+                            className="fw-bold level2-title",
                             style={
                                 "fontSize": "16px",
                                 "lineHeight": "1.2",
@@ -1545,7 +1313,7 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
                         ),
                         html.Div(
                             n.summary.subtitle,
-                            className="text-muted small mt-1",
+                            className="text-muted small mt-1 level2-subtitle",
                             style={"userSelect": "text"},
                         ) if n.summary.subtitle else None,
                         render_badges(
@@ -1553,9 +1321,10 @@ def update_level2_list(n_clicks, level1_ids, node_map, selected):
                             className="mt-2",
                         ) if badges_for_view(n.summary.badges or [], "header") else None,
                     ],
-                    className="w-100",
+                    className="w-100 level2-header",
                 ),
                 item_id=n.id,
+                className="level2-accordion-item",
             )
         )
 
@@ -1770,22 +1539,10 @@ def open_viewer_modal(n_clicks_list, close_clicks, id_list):
         return False, dash.no_update, dash.no_update, None, {"scale": 1.0}
 
     if not triggered or not isinstance(triggered, dict) or triggered.get("type") != "btn-view":
-        return (
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-        )
+        return (dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update,)
 
     if not n_clicks_list or not any((n or 0) > 0 for n in n_clicks_list):
-        return (
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-        )
+        return (dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update,)
 
     triggered_clicks = 0
     for clicks, btn_id in zip(n_clicks_list or [], id_list or []):
@@ -1794,13 +1551,7 @@ def open_viewer_modal(n_clicks_list, close_clicks, id_list):
             break
 
     if triggered_clicks <= 0:
-        return (
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-        )
+        return (dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update,)
 
     file_id = triggered.get("index")
     file_name = triggered.get("file_name")
@@ -1847,33 +1598,26 @@ def load_viewer_content(viewer_request):
     if not viewer_request or not viewer_request.get("file_id"):
         return dash.no_update, dash.no_update
 
-    file_id = viewer_request.get("file_id")
-    file_name = viewer_request.get("file_name")
-    vault_id = viewer_request.get("vault_id")
+    viewer_file_ref = ViewerFileRef(
+        file_id=viewer_request["file_id"],
+        file_name=viewer_request["file_name"],
+        vault_id=viewer_request["vault_id"],
+    )
 
     try:
-        request_id = uuid.uuid4().hex.upper()
-        request_dir = os.path.join(TEMP_VIEWER_PATH, request_id)
-        ensure_dir(request_dir)
-        touch_dir(request_dir)
-
-        local_path = os.path.join(request_dir, Path(file_name).name)
-        service.download_to_server_via_odata(vault_id=vault_id, dest=local_path)
-
-        if not os.path.exists(local_path):
-            return (
-                html.Div("Downloaded file not found.", className="text-danger"),
-                {},
-            )
-
-        body = build_viewer_content(local_path, file_name)
+        viewer_file = resolve_viewer_file(
+            service=service,
+            viewer_file_ref=viewer_file_ref,
+            temp_viewer_path=TEMP_VIEWER_PATH,
+        )
+        body = render_viewer_content(viewer_file)
 
         return (
             body,
             {
-                "file_id": file_id,
-                "file_name": file_name,
-                "local_path": local_path,
+                "file_id": viewer_file_ref.file_id,
+                "file_name": viewer_file.file_name,
+                "local_path": str(viewer_file.local_path),
             },
         )
 
@@ -2073,8 +1817,3 @@ def handle_file_upload(contents_list, filenames, component_id):
     except Exception as e:
         return html.Div(f"Upload failed: {e}", className="text-danger")
 
-
-if __name__ == "__main__":
-    run_startup_cleanup()
-    start_temp_cleanup_scheduler()
-    app.run(host="127.0.0.1", debug=True)
